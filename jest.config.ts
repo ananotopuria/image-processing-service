@@ -15,8 +15,11 @@ const config: Config = {
   rootDir: '.',
   testRegex: '.*\\.spec\\.ts$',
   transform: {
-    '^.+\\.(t|j)s$': 'ts-jest',
+    '^.+\\.js$': '<rootDir>/test/jest-commonjs-transformer.cjs',
+    '^.+\\.ts$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json' }],
   },
+  // NestJS 12 ships ESM; transform it for Jest's CommonJS runtime.
+  transformIgnorePatterns: ['/node_modules/(?!@nestjs/)'],
   moduleNameMapper: pathsToModuleNameMapper(paths, { prefix: '<rootDir>/' }),
   collectCoverageFrom: [
     'src/**/*.(t|j)s',
