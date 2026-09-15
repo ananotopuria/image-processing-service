@@ -3,16 +3,24 @@ import {
   FileTypeValidator,
   MaxFileSizeValidator,
   ParseFilePipe,
+  Get,
   Post,
   Query,
+  Param,
+  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
+  Delete,
+  HttpCode,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth/jwt-auth.guard';
+import {
+  JwtAuthGuard,
+  type AuthenticatedRequest,
+} from '../auth/guards/jwt-auth/jwt-auth.guard';
 import { TransformImageDto } from './dto/transform-image.dto';
 import { ImagesService } from './images.service';
 
@@ -41,9 +49,35 @@ export class ImagesController {
       }),
     )
     file: Express.Multer.File,
-
     @Query() transformations: TransformImageDto,
+    @Req() request: AuthenticatedRequest,
   ) {
-    return this.imagesService.resizeImage(file, transformations);
+    return this.imagesService.resizeImage(
+      file,
+      transformations,
+      request.user!.sub,
+    );
+  }
+  @Get()
+  @UseGuards(JwtAuthGuard)
+  async getMyImages(@Req() request: AuthenticatedRequest) {
+    return this.imagesService.findAllByUser(request.user!.sub);
+  }
+  @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  async getImageById(
+    @Param('id') id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.findOneByUser(id, request.user!.sub);
+  }
+  @Delete(':id')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  async deleteImage(
+    @Param('id') id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.removeByUser(id, request.user!.sub);
   }
 }
