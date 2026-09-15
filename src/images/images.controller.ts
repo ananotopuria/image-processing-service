@@ -4,14 +4,17 @@ import {
   MaxFileSizeValidator,
   ParseFilePipe,
   Post,
+  Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth/jwt-auth.guard';
-import { ImagesService } from './images.service';
 import { memoryStorage } from 'multer';
+
+import { JwtAuthGuard } from '../auth/guards/jwt-auth/jwt-auth.guard';
+import { TransformImageDto } from './dto/transform-image.dto';
+import { ImagesService } from './images.service';
 
 @Controller('images')
 export class ImagesController {
@@ -38,7 +41,9 @@ export class ImagesController {
       }),
     )
     file: Express.Multer.File,
+
+    @Query() transformations: TransformImageDto,
   ) {
-    return this.imagesService.resizeImage(file);
+    return this.imagesService.resizeImage(file, transformations);
   }
 }
