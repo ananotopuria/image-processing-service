@@ -2,10 +2,9 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { randomUUID } from 'node:crypto';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import sharp from 'sharp';
 
+import { S3Service } from '../s3/s3.service';
 import { TransformImageDto } from './dto/transform-image.dto';
 import { Image, ImageDocument } from './schemas/image.schema';
 
@@ -14,6 +13,7 @@ export class ImagesService {
   constructor(
     @InjectModel(Image.name)
     private readonly imageModel: Model<ImageDocument>,
+    private readonly s3Service: S3Service,
   ) {}
 
   async resizeImage(
@@ -49,22 +49,18 @@ export class ImagesService {
 
     const processedImage = await image.toBuffer();
 
-    const outputDirectory = join(process.cwd(), 'uploads', 'processed');
-
-    await mkdir(outputDirectory, {
-      recursive: true,
-    });
-
     const filename = `${randomUUID()}.${format}`;
-    const outputPath = join(outputDirectory, filename);
+    const key = `processed/${filename}`;
 
-    await writeFile(outputPath, processedImage);
+    const contentType = format === 'jpeg' ? 'image/jpeg' : `image/${format}`;
+
+    await this.s3Service.uploadFile(key, processedImage, contentType);
 
     const savedImage = await this.imageModel.create({
       user: new Types.ObjectId(userId),
       originalName: file.originalname,
       filename,
-      path: `uploads/processed/${filename}`,
+      path: key,
       format,
       width,
       height,
@@ -106,13 +102,7 @@ export class ImagesService {
   async removeByUser(imageId: string, userId: string) {
     const image = await this.findOneByUser(imageId, userId);
 
-    const filePath = join(process.cwd(), image.path);
-
-    try {
-      await unlink(filePath);
-    } catch {
-      // File may already be missing from local storage.
-    }
+    await this.s3Service.deleteFile(image.path);
 
     await this.imageModel.deleteOne({
       _id: image._id,
