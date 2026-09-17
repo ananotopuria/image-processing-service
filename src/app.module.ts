@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { ImagesModule } from './images/images.module';
+import { S3Module } from './s3/s3.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { ImagesModule } from './images/images.module';
     UsersModule,
     AuthModule,
     ImagesModule,
+    S3Module,
   ],
   controllers: [AppController],
   providers: [AppService],
