@@ -14,6 +14,7 @@ import { instanceToPlain } from 'class-transformer';
 import sharp from 'sharp';
 
 import { S3Service } from '../s3/s3.service';
+import { ListImagesDto } from './dto/list-images.dto';
 import {
   ImageTransformationsDto,
   TransformImageDto,
@@ -41,7 +42,7 @@ export class ImagesService {
     const key = `originals/${userId}/${filename}`;
     await this.s3Service.uploadFile(key, file.buffer, file.mimetype);
 
-    return this.saveUploadedImage({
+    const savedImage = await this.saveUploadedImage({
       kind: 'original',
       user: new Types.ObjectId(userId),
       originalName: file.originalname,
@@ -52,6 +53,7 @@ export class ImagesService {
       format,
       originalSize: file.size,
     });
+    return this.withAccessUrls(savedImage);
   }
 
   async transformImage(
@@ -187,7 +189,7 @@ export class ImagesService {
     const mimeType = `image/${format}`;
     await this.s3Service.uploadFile(key, processed.data, mimeType);
 
-    return this.saveUploadedImage({
+    const savedImage = await this.saveUploadedImage({
       kind: 'transformed',
       originalImageId: original._id,
       originalKey: original.originalKey,
@@ -205,6 +207,7 @@ export class ImagesService {
       processedSize: processed.data.length,
       transformations: applied,
     });
+    return this.withAccessUrls(savedImage);
   }
 
   private async saveUploadedImage(metadata: Image) {
@@ -223,11 +226,33 @@ export class ImagesService {
     }
   }
 
-  async findAllByUser(userId: string) {
-    return this.imageModel
-      .find({ user: new Types.ObjectId(userId) })
-      .sort({ createdAt: -1 })
-      .exec();
+  private async withAccessUrls(image: ImageDocument) {
+    return {
+      ...image.toObject(),
+      ...(await this.s3Service.getFileUrls(image.path)),
+    };
+  }
+
+  async getImageByUser(imageId: string, userId: string) {
+    // Sign the stored key only after the owner-filtered lookup succeeds.
+    return this.withAccessUrls(await this.findOneByUser(imageId, userId));
+  }
+
+  async findAllByUser(userId: string, { page, limit }: ListImagesDto) {
+    const filter = { user: new Types.ObjectId(userId) };
+    const [images, total] = await Promise.all([
+      this.imageModel
+        .find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .exec(),
+      this.imageModel.countDocuments(filter).exec(),
+    ]);
+    const items = await Promise.all(
+      images.map((image) => this.withAccessUrls(image)),
+    );
+    return { items, page, limit, total, totalPages: Math.ceil(total / limit) };
   }
 
   async findOneByUser(imageId: string, userId: string) {

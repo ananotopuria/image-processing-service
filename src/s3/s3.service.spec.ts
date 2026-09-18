@@ -1,3 +1,4 @@
+import * as presigner from '@aws-sdk/s3-request-presigner';
 import { BadGatewayException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -8,11 +9,19 @@ import {
 } from '@aws-sdk/client-s3';
 import { S3Service } from './s3.service';
 
+jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
+
 describe('S3Service', () => {
   let service: S3Service;
   let send: jest.SpyInstance;
 
   beforeEach(() => {
+    jest
+      .mocked(presigner.getSignedUrl)
+      .mockReset()
+      .mockImplementation(
+        jest.requireActual('@aws-sdk/s3-request-presigner').getSignedUrl,
+      );
     send = jest
       .spyOn(S3Client.prototype, 'send')
       .mockResolvedValue({} as never);
@@ -27,6 +36,42 @@ describe('S3Service', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it('creates scoped display/download URLs with expiry without reading object bytes', async () => {
+    const before = Date.now();
+    const result = await service.getFileUrls(
+      'transformed/user/original/image.webp',
+    );
+    const display = new URL(result.url);
+    const download = new URL(result.downloadUrl);
+    expect(display.protocol).toBe('https:');
+    expect(display.pathname).toBe('/transformed/user/original/image.webp');
+    expect(display.searchParams.get('X-Amz-Expires')).toBe('900');
+    expect(display.searchParams.get('response-content-disposition')).toBe(
+      'inline',
+    );
+    expect(download.searchParams.get('response-content-disposition')).toBe(
+      'attachment',
+    );
+    expect(display.searchParams.get('response-cache-control')).toBe(
+      'private, no-store',
+    );
+    expect(display.searchParams.has('X-Amz-Signature')).toBe(true);
+    expect(new Date(result.urlExpiresAt).getTime()).toBeGreaterThanOrEqual(
+      before + 900000,
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('returns a safe 502 if URL signing fails', async () => {
+    jest
+      .mocked(presigner.getSignedUrl)
+      .mockRejectedValue(new Error('private credential detail'));
+    await expect(service.getFileUrls('key')).rejects.toMatchObject({
+      status: 502,
+      message: 'Unable to create image access URLs',
+    });
+  });
 
   it('retrieves object bytes as a Buffer', async () => {
     send.mockResolvedValue({

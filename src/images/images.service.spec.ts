@@ -26,10 +26,12 @@ describe('ImagesService', () => {
     findOne: jest.Mock;
     find: jest.Mock;
     deleteOne: jest.Mock;
+    countDocuments: jest.Mock;
   };
   let storage: {
     uploadFile: jest.Mock;
     getFile: jest.Mock;
+    getFileUrls: jest.Mock;
     deleteFile: jest.Mock;
   };
   const file = () =>
@@ -59,16 +61,28 @@ describe('ImagesService', () => {
       originalSize: buffer.length,
     };
     model = {
-      create: jest.fn().mockImplementation(async (data) => data),
+      create: jest.fn().mockImplementation(async (data) => ({
+        ...data,
+        toObject: () => data,
+      })),
       findOne: jest
         .fn()
         .mockReturnValue({ exec: jest.fn().mockResolvedValue(original) }),
       find: jest.fn(),
       deleteOne: jest.fn().mockResolvedValue({ deletedCount: 1 }),
+      countDocuments: jest
+        .fn()
+        .mockReturnValue({ exec: jest.fn().mockResolvedValue(1) }),
     };
+    original.toObject = () => ({ ...original, toObject: undefined });
     storage = {
       uploadFile: jest.fn().mockResolvedValue(undefined),
       getFile: jest.fn().mockResolvedValue(buffer),
+      getFileUrls: jest.fn().mockResolvedValue({
+        url: 'https://example.com/image',
+        downloadUrl: 'https://example.com/download',
+        urlExpiresAt: '2026-09-18T12:15:00.000Z',
+      }),
       deleteFile: jest.fn().mockResolvedValue(undefined),
     };
     service = new ImagesService(
@@ -94,6 +108,7 @@ describe('ImagesService', () => {
     expect(result).not.toHaveProperty('quality');
     expect(result).not.toHaveProperty('processedSize');
     expect(storage.getFile).not.toHaveBeenCalled();
+    expect(model.create.mock.calls[0]?.[0]).not.toHaveProperty('url');
   });
 
   it('creates distinct originals when the same file is uploaded twice', async () => {
@@ -598,14 +613,92 @@ describe('ImagesService', () => {
     expect(storage.deleteFile).not.toHaveBeenCalledWith(original.path);
   });
 
-  it('lists all owned records newest first', async () => {
-    const exec = jest.fn().mockResolvedValue([original]);
-    const sort = jest.fn().mockReturnValue({ exec });
-    model.find.mockReturnValue({ sort });
-    await expect(service.findAllByUser(userId)).resolves.toEqual([original]);
-    expect(model.find).toHaveBeenCalledWith({
-      user: new Types.ObjectId(userId),
+  it('paginates and counts only owned records with stable newest-first sorting', async () => {
+    const query = {
+      exec: jest.fn().mockResolvedValue([original]),
+      sort: jest.fn(),
+      skip: jest.fn(),
+      limit: jest.fn(),
+    };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockReturnValue(query);
+    model.find.mockReturnValue(query);
+    model.countDocuments.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(42),
     });
-    expect(sort).toHaveBeenCalledWith({ createdAt: -1 });
+    const result = await service.findAllByUser(userId, { page: 2, limit: 10 });
+    expect(result).toMatchObject({
+      page: 2,
+      limit: 10,
+      total: 42,
+      totalPages: 5,
+      items: [expect.objectContaining({ url: 'https://example.com/image' })],
+    });
+    const filter = { user: new Types.ObjectId(userId) };
+    expect(model.find).toHaveBeenCalledWith(filter);
+    expect(model.countDocuments).toHaveBeenCalledWith(filter);
+    expect(query.sort).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
+    expect(query.skip).toHaveBeenCalledWith(10);
+    expect(query.limit).toHaveBeenCalledWith(10);
+    expect(storage.getFileUrls).toHaveBeenCalledWith(original.path);
+  });
+
+  it.each([0, 5])('returns an empty page with total %i', async (total) => {
+    const query = {
+      exec: jest.fn().mockResolvedValue([]),
+      sort: jest.fn(),
+      skip: jest.fn(),
+      limit: jest.fn(),
+    };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockReturnValue(query);
+    model.find.mockReturnValue(query);
+    model.countDocuments.mockReturnValue({
+      exec: jest.fn().mockResolvedValue(total),
+    });
+    await expect(
+      service.findAllByUser(userId, { page: 2, limit: 10 }),
+    ).resolves.toEqual({
+      items: [],
+      page: 2,
+      limit: 10,
+      total,
+      totalPages: total ? 1 : 0,
+    });
+    expect(storage.getFileUrls).not.toHaveBeenCalled();
+  });
+
+  it.each(['original', 'transformed', undefined])(
+    'signs the stored path for an owned %s record',
+    async (kind) => {
+      original.kind = kind;
+      original.path = 'stored/selected-file.png';
+      const result = await service.getImageByUser(imageId, userId);
+      expect(result.url).toBe('https://example.com/image');
+      expect(storage.getFileUrls).toHaveBeenCalledWith(original.path);
+      expect(storage.getFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not issue URLs for an invalid ID or another user’s image', async () => {
+    await expect(
+      service.getImageByUser('invalid', userId),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    model.findOne.mockReturnValue({ exec: jest.fn().mockResolvedValue(null) });
+    await expect(
+      service.getImageByUser(imageId, userId),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.getFileUrls).not.toHaveBeenCalled();
+  });
+
+  it('does not delete persisted images when URL signing fails', async () => {
+    storage.getFileUrls.mockRejectedValue(new BadGatewayException());
+    await expect(service.uploadImage(file(), userId)).rejects.toBeInstanceOf(
+      BadGatewayException,
+    );
+    expect(model.create).toHaveBeenCalledTimes(1);
+    expect(storage.deleteFile).not.toHaveBeenCalled();
   });
 });

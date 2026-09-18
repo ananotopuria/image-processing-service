@@ -2,6 +2,8 @@
 
 The application uses the `/api` global prefix. Swagger UI is at `/api/docs`.
 All image endpoints require `Authorization: Bearer <accessToken>`.
+See [the final backend audit](backend-audit.md) for the roadmap checklist,
+rate limits, deployment concerns, and full Postman flow.
 
 ## Requests in Postman
 
@@ -11,6 +13,7 @@ All image endpoints require `Authorization: Bearer <accessToken>`.
    - Let Postman generate the multipart Content-Type and boundary.
    - File size must be less than 5 MiB (5,242,880 bytes).
    - Save `_id` from the 201 response as `originalImageId`.
+   - The response includes `url`, `downloadUrl`, and `urlExpiresAt`.
    - Upload no longer processes images or takes transformation query options.
 2. **Transform:** `POST http://localhost:3000/api/images/{{originalImageId}}/transform`
    - Authorization: the same Bearer Token.
@@ -154,9 +157,41 @@ The existing `images` collection stores both record types:
 | `transformations` | Absent | Requested operations plus resolved encoding/crop-offset defaults |
 | `createdAt`, `updatedAt` | Record timestamps | Version timestamps |
 
-`GET /api/images` returns originals, versions, and legacy records, newest first.
-Group versions by `originalImageId` in the frontend. `GET /api/images/:id`
-returns an owned record. S3 keys are not download URLs.
+`GET /api/images?page=1&limit=10` returns a pagination envelope:
+
+```json
+{ "items": [], "page": 1, "limit": 10, "total": 0, "totalPages": 0 }
+```
+
+Defaults are page 1 and limit 10. Limit is at most 50 and page at most 100000.
+Both must be positive integers; duplicate parameters, decimal strings, empty
+values, and unknown parameters are rejected. Results include owned originals,
+versions, and legacy records, ordered by `createdAt` descending then `_id`
+descending. Counts include versions. Pages beyond the last page have empty
+`items` while retaining the correct total. Counts and records are separate
+queries and may briefly differ during concurrent writes.
+
+`GET /api/images/:id` returns an owned record with fresh access URLs. Upload,
+transform, and each item in a list also include:
+
+- `url`: temporary HTTPS S3 GET URL for display.
+- `downloadUrl`: a URL with attachment content disposition for downloading.
+- `urlExpiresAt`: maximum expiration time (15 minutes after signing).
+
+URLs use the selected record's `path`, so an original ID accesses the original,
+and a version ID accesses that specific version. They are generated on demand,
+never stored in MongoDB, and the API responses use `Cache-Control: private,
+no-store`. Only an owned record can cause its key to be signed. The bucket stays
+private. URL possession grants access until expiry; avoid sharing/logging these
+links. AWS policy or credential expiration may shorten validity. Regenerate
+expired URLs by fetching the record again. Secret access keys never appear in
+responses; presigned URLs necessarily carry AWS's signature and access-key
+identifier. Signing does not check object existence: missing objects or revoked
+permissions surface when the client follows the URL. See [AWS's presigned URL
+guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html).
+
+Group versions by `originalImageId` in the frontend. S3 `path` and `originalKey`
+are keys, not directly usable public URLs.
 
 `DELETE /api/images/:id` removes that record and object. For an original it also
 removes its owned versions, processing versions first. Deleting a version does
@@ -171,10 +206,13 @@ not affect its original or siblings.
 - 404: invalid MongoDB ID, nonexistent image, or another user's image. Storage is
   not accessed before the ownership check.
 - 409: legacy record has no preserved original; re-upload required.
+- 413: multipart file size at or above 5 MiB, rejected while streaming into memory.
 - 422: Sharp could not decode the stored original.
-- 502: S3 retrieval, upload, or deletion failure. Raw AWS errors are not returned.
+- 429: endpoint rate limit exceeded; see `Retry-After` (seconds).
+- 502: S3 retrieval, upload, deletion, or URL signing failure. Raw AWS errors are not returned.
 - 500: database failure. If metadata creation fails after an upload, the service
-  attempts to delete the newly uploaded object.
+  attempts to delete the newly uploaded object. URL signing occurs after persistence;
+  if signing fails, the saved record remains available through list/get.
 
 MongoDB and S3 do not share a transaction. Cleanup is best effort; a crash or a
 cleanup failure can leave an orphan object. Cascade deletion can partially
@@ -202,14 +240,17 @@ Numeric strings are no longer coerced; send JSON numbers. Upload remains unchang
 New versions have an optional `transformations` metadata object with resolved
 format/quality and crop offsets, plus explicitly supplied options (including
 false flags). Historical versions remain valid without it; no database migration
-or fabricated transformation history is needed. Original records still omit
+or fabricated transformation history is needed. The Day 3 list response changes
+from a bare array to the pagination envelope. New access URL fields are computed
+and require no migration. Original records still omit
 quality, processedSize, and dimensions. Output dimensions are actual final sizes.
 
 Verify the existing deployment's S3 policy permits `GetObject` for the originals
 prefix and `PutObject`/`DeleteObject` for both new prefixes. No IAM policy or AWS
 configuration is modified by this change. The new `originalImageId` index is
 created through normal Mongoose index management; deployments with auto-indexing
-disabled should provision that index through their usual migration process.
+disabled should provision that index and the Day 3 `{ user: 1, createdAt: -1, _id: -1 }`
+listing index through their usual migration process.
 
 ## Verification and later work
 
@@ -226,5 +267,11 @@ reading its S3 object and composite it after color filters and before encoding.
 Do not accept arbitrary remote URLs or filesystem paths. No watermark request
 field is accepted in this implementation.
 
-Pagination and rate limiting remain Day 3 work and have not been added. Source
-version selection and animated multi-frame processing are also not added.
+Rate limits are held in process memory: upload and transform each allow 10
+requests/minute per authenticated user, shared across image IDs and tokens.
+List/get/delete each allow 60/minute per user. Sign-up and sign-in each allow
+10/minute per client IP; profile allows 60/minute per IP. Invalid authenticated
+requests also consume quota because guards run before validation. In-memory
+quotas reset on restart and are not coordinated across replicas.
+
+Source version selection and animated multi-frame processing are not added.

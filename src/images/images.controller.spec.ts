@@ -1,3 +1,5 @@
+import { ThrottlerModule } from '@nestjs/throttler';
+import { ListImagesDto } from './dto/list-images.dto';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
@@ -18,7 +20,10 @@ describe('Images API contract', () => {
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
-      imports: [JwtModule.register({ secret: 'test-only-secret' })],
+      imports: [
+        JwtModule.register({ secret: 'test-only-secret' }),
+        ThrottlerModule.forRoot([{ ttl: 60000, limit: 60 }]),
+      ],
       controllers: [ImagesController],
       providers: [{ provide: ImagesService, useValue: {} }, JwtAuthGuard],
     }).compile();
@@ -184,6 +189,72 @@ describe('Images API contract', () => {
   ])('rejects invalid, empty, null, or unexpected input: %j', async (body) => {
     await expect(
       pipe.transform(body, { type: 'body', metatype: TransformImageDto }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('documents pagination and access URLs', () => {
+    const doc = SwaggerModule.createDocument(
+      app,
+      new DocumentBuilder().addBearerAuth().build(),
+    );
+    expect(doc.paths['/api/images'].get!.parameters).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'page', in: 'query', required: false }),
+        expect.objectContaining({
+          name: 'limit',
+          in: 'query',
+          required: false,
+        }),
+      ]),
+    );
+    expect(doc.paths['/api/images'].get!.responses['200']).toMatchObject({
+      content: {
+        'application/json': {
+          schema: { $ref: '#/components/schemas/PaginatedImagesDto' },
+        },
+      },
+    });
+    expect(doc.components!.schemas!.ImageResponseDto).toMatchObject({
+      required: expect.arrayContaining(['url', 'downloadUrl', 'urlExpiresAt']),
+    });
+    expect(
+      doc.paths['/api/images/{id}/transform'].post!.responses,
+    ).toHaveProperty('429');
+  });
+
+  it.each([
+    [{}, { page: 1, limit: 10 }],
+    [
+      { page: '2', limit: '50' },
+      { page: 2, limit: 50 },
+    ],
+  ])(
+    'validates pagination defaults and numeric query strings',
+    async (input, expected) => {
+      await expect(
+        pipe.transform(input, { type: 'query', metatype: ListImagesDto }),
+      ).resolves.toMatchObject(expected);
+    },
+  );
+
+  it.each([
+    { page: '0' },
+    { page: '-1' },
+    { page: '1.5' },
+    { page: '' },
+    { page: 'foo' },
+    { page: '1e2' },
+    { page: '100001' },
+    { page: ['1', '2'] },
+    { page: null },
+    { limit: '51' },
+    { limit: '0' },
+    { limit: true },
+    { limit: '1.1' },
+    { extra: 'field' },
+  ])('rejects invalid pagination: %j', async (input) => {
+    await expect(
+      pipe.transform(input, { type: 'query', metatype: ListImagesDto }),
     ).rejects.toMatchObject({ status: 400 });
   });
 

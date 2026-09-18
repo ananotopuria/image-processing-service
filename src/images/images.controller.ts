@@ -1,3 +1,7 @@
+import { Throttle } from '@nestjs/throttler';
+import { UserThrottlerGuard } from './guards/user-throttler.guard';
+import { ListImagesDto } from './dto/list-images.dto';
+import { PaginatedImagesDto } from './dto/paginated-images.dto';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -14,6 +18,8 @@ import {
   ApiBadGatewayResponse,
   ApiConflictResponse,
   ApiUnprocessableEntityResponse,
+  ApiTooManyRequestsResponse,
+  ApiPayloadTooLargeResponse,
 } from '@nestjs/swagger';
 import { ImageResponseDto } from './dto/image-response.dto';
 import {
@@ -31,6 +37,8 @@ import {
   UseInterceptors,
   Delete,
   HttpCode,
+  Query,
+  Header,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -47,11 +55,24 @@ import { ImagesService } from './images.service';
 @ApiUnauthorizedResponse({
   description: 'Authentication token is required, invalid, or expired.',
 })
+@ApiInternalServerErrorResponse({
+  description:
+    'An unexpected server or database error occurred. Internal details are not returned.',
+})
+@ApiTooManyRequestsResponse({
+  description:
+    'Rate limit exceeded. Upload and transform: 10/minute each per user; other image endpoints: 60/minute each per user. Retry after the Retry-After header delay.',
+})
 @Controller('images')
 export class ImagesController {
   constructor(private readonly imagesService: ImagesService) {}
 
   @Post('upload')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Header('Cache-Control', 'private, no-store')
+  @ApiPayloadTooLargeResponse({
+    description: 'File size must be smaller than 5 MiB (5,242,880 bytes).',
+  })
   @ApiOperation({
     summary: 'Upload an original image',
     description:
@@ -79,16 +100,20 @@ export class ImagesController {
   })
   @ApiBadRequestResponse({
     description:
-      'Missing file, unsupported file type, or file size at or above 5 MiB.',
+      'Missing file, unsupported file type, or unexpected file fields/files.',
   })
   @ApiInternalServerErrorResponse({
     description: 'Unable to save image metadata.',
   })
-  @ApiBadGatewayResponse({ description: 'Unable to upload image to storage.' })
-  @UseGuards(JwtAuthGuard)
+  @ApiBadGatewayResponse({
+    description: 'Unable to upload image or create access URLs.',
+  })
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),
+      // Multer 2.4 uses an inclusive limit; the API requires strictly less than 5 MiB.
+      limits: { fileSize: 5 * 1024 * 1024 - 1, files: 1 },
     }),
   )
   async uploadImage(
@@ -111,6 +136,8 @@ export class ImagesController {
     return this.imagesService.uploadImage(file, request.user!.sub);
   }
   @Post(':id/transform')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Header('Cache-Control', 'private, no-store')
   @ApiOperation({
     summary: 'Create a transformed version of an original image',
     description:
@@ -171,10 +198,10 @@ export class ImagesController {
   })
   @ApiBadGatewayResponse({
     description:
-      'Unable to retrieve the original or upload the transformed image to storage.',
+      'Unable to retrieve the original, upload the transformed image, or create access URLs.',
   })
   @ApiInternalServerErrorResponse({ description: 'Database operation failed.' })
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
   async transformImage(
     @Param('id') id: string,
     @Body() transformations: TransformImageDto,
@@ -188,25 +215,34 @@ export class ImagesController {
   }
 
   @Get()
+  @Header('Cache-Control', 'private, no-store')
+  @ApiBadRequestResponse({
+    description: 'Invalid pagination values or unknown query parameters.',
+  })
+  @ApiBadGatewayResponse({ description: 'Unable to create image access URLs.' })
   @ApiOperation({
     summary: 'List my images',
     description:
-      'Return all originals, transformed versions, and legacy image records owned by the authenticated user, newest first. Group versions by originalImageId. Returns an empty array when no images exist.',
+      'Return a page of owned originals, versions, and legacy records, newest first (ID breaks timestamp ties). Includes temporary display/download URLs. Defaults: page 1, limit 10; maximum limit 50. Group versions by originalImageId. Out-of-range pages have empty items.',
   })
   @ApiOkResponse({
-    description: 'Image metadata ordered by creation time descending.',
-    type: ImageResponseDto,
-    isArray: true,
+    description: 'Paginated image metadata with temporary access URLs.',
+    type: PaginatedImagesDto,
   })
-  @UseGuards(JwtAuthGuard)
-  async getMyImages(@Req() request: AuthenticatedRequest) {
-    return this.imagesService.findAllByUser(request.user!.sub);
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
+  async getMyImages(
+    @Query() pagination: ListImagesDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.findAllByUser(request.user!.sub, pagination);
   }
   @Get(':id')
+  @Header('Cache-Control', 'private, no-store')
+  @ApiBadGatewayResponse({ description: 'Unable to create image access URLs.' })
   @ApiOperation({
-    summary: 'Get image metadata',
+    summary: 'Retrieve an image with temporary access URLs',
     description:
-      'Return metadata for an image owned by the authenticated user.',
+      'Return owned image metadata and fresh 15-minute display/download URLs. Use the original ID for the original file or a version ID for its transformed file. The bucket remains private; anyone holding a URL can use it until expiry.',
   })
   @ApiParam({
     name: 'id',
@@ -218,12 +254,12 @@ export class ImagesController {
     description:
       'Image not found: the identifier is invalid, the image does not exist, or it belongs to another user.',
   })
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
   async getImageById(
     @Param('id') id: string,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.imagesService.findOneByUser(id, request.user!.sub);
+    return this.imagesService.getImageByUser(id, request.user!.sub);
   }
   @Delete(':id')
   @ApiOperation({
@@ -253,7 +289,7 @@ export class ImagesController {
   @ApiInternalServerErrorResponse({
     description: 'Database deletion failed.',
   })
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
   @ApiBadGatewayResponse({
     description: 'Unable to delete image from storage; retry the request.',
   })

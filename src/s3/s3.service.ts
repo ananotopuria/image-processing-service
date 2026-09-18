@@ -1,3 +1,4 @@
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { BadGatewayException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -58,6 +59,36 @@ export class S3Service {
       return Buffer.from(await response.Body.transformToByteArray());
     } catch {
       throw new BadGatewayException('Unable to retrieve image from storage');
+    }
+  }
+
+  async getFileUrls(key: string) {
+    const expiresIn = 15 * 60;
+    const signingDate = new Date();
+    try {
+      const [url, downloadUrl] = await Promise.all(
+        ['inline', 'attachment'].map((disposition) =>
+          getSignedUrl(
+            this.s3Client,
+            new GetObjectCommand({
+              Bucket: this.bucketName,
+              Key: key,
+              ResponseContentDisposition: disposition,
+              ResponseCacheControl: 'private, no-store',
+            }),
+            { expiresIn, signingDate },
+          ),
+        ),
+      );
+      return {
+        url,
+        downloadUrl,
+        urlExpiresAt: new Date(
+          signingDate.getTime() + expiresIn * 1000,
+        ).toISOString(),
+      };
+    } catch {
+      throw new BadGatewayException('Unable to create image access URLs');
     }
   }
 

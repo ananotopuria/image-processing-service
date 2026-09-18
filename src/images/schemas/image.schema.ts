@@ -99,3 +99,5 @@ export class Image {
 }
 
 export const ImageSchema = SchemaFactory.createForClass(Image);
+
+ImageSchema.index({ user: 1, createdAt: -1, _id: -1 });

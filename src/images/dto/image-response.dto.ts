@@ -2,6 +2,31 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ImageTransformationsDto } from './transform-image.dto';
 
 export class ImageResponseDto {
+  @ApiProperty({
+    description:
+      'Temporary HTTPS URL for displaying this file. Valid for up to 15 minutes; treat as a bearer link. Refresh using GET /api/images/{id}.',
+    format: 'uri',
+    example:
+      'https://example-bucket.s3.amazonaws.com/originals/user/image.jpeg?X-Amz-Signature=example',
+  })
+  url: string;
+
+  @ApiProperty({
+    description: 'Temporary URL that downloads this file as an attachment.',
+    format: 'uri',
+    example:
+      'https://example-bucket.s3.amazonaws.com/originals/user/image.jpeg?response-content-disposition=attachment&X-Amz-Signature=example',
+  })
+  downloadUrl: string;
+
+  @ApiProperty({
+    description:
+      'URL expiration time. Credentials or bucket policy may expire access sooner.',
+    format: 'date-time',
+    example: '2026-09-18T12:15:00.000Z',
+  })
+  urlExpiresAt: string;
+
   @ApiPropertyOptional({
     type: ImageTransformationsDto,
     description:
