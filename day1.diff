@@ -1,0 +1,677 @@
+diff --git a/src/images/dto/image-response.dto.ts b/src/images/dto/image-response.dto.ts
+index 2dc5b69..013206a 100644
+--- a/src/images/dto/image-response.dto.ts
++++ b/src/images/dto/image-response.dto.ts
+@@ -1,6 +1,35 @@
+ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+ 
+ export class ImageResponseDto {
++  @ApiPropertyOptional({
++    description:
++      'Record type. Absent on legacy records created before originals were preserved.',
++    enum: ['original', 'transformed'],
++    example: 'original',
++  })
++  kind?: 'original' | 'transformed';
++
++  @ApiPropertyOptional({
++    description: 'Original image ID. Present only on transformed versions.',
++    example: '66e83a109af861ce27c86a02',
++  })
++  originalImageId?: string;
++
++  @ApiPropertyOptional({
++    description:
++      'S3 key of the preserved original; shared by its versions. Absent on legacy records.',
++    example:
++      'originals/66e83a109af861ce27c86a01/9c1c0381-01af-4210-970c-68292d28c577.jpeg',
++  })
++  originalKey?: string;
++
++  @ApiPropertyOptional({
++    description: 'MIME type of this stored file. Absent on legacy records.',
++    enum: ['image/jpeg', 'image/png', 'image/webp'],
++    example: 'image/jpeg',
++  })
++  mimeType?: string;
++
+   @ApiProperty({
+     description: 'Image identifier.',
+     example: '66e83a109af861ce27c86a02',
+@@ -17,22 +46,25 @@ export class ImageResponseDto {
+   originalName: string;
+ 
+   @ApiProperty({
+-    description: 'Generated output filename.',
+-    example: '9c1c0381-01af-4210-970c-68292d28c577.webp',
++    description: 'Generated filename for this original or transformed version.',
++    example: '9c1c0381-01af-4210-970c-68292d28c577.jpeg',
+   })
+   filename: string;
+ 
+   @ApiProperty({
+-    description: 'S3 object key, not a download URL.',
+-    example: 'processed/9c1c0381-01af-4210-970c-68292d28c577.webp',
++    description:
++      'S3 key for this file, not a download URL. Originals use originals/{userId}/; versions use transformed/{userId}/{originalImageId}/.',
++    example:
++      'originals/66e83a109af861ce27c86a01/9c1c0381-01af-4210-970c-68292d28c577.jpeg',
+   })
+   path: string;
+ 
+-  @ApiProperty({ enum: ['jpeg', 'png', 'webp'], example: 'webp' })
++  @ApiProperty({ enum: ['jpeg', 'png', 'webp'], example: 'jpeg' })
+   format: string;
+ 
+   @ApiPropertyOptional({
+-    description: 'Stored target width in pixels.',
++    description:
++      'Actual output width in pixels for transformed versions. Legacy records store the requested width.',
+     type: 'integer',
+     example: 1200,
+   })
+@@ -40,14 +72,21 @@ export class ImageResponseDto {
+ 
+   @ApiPropertyOptional({
+     description:
+-      'Stored target height in pixels; omitted when no height was requested.',
++      'Actual output height in pixels for transformed versions. Legacy records store the requested height, if any.',
+     type: 'integer',
+     example: 800,
+   })
+   height?: number;
+ 
+-  @ApiProperty({ minimum: 1, maximum: 100, type: 'integer', example: 85 })
+-  quality: number;
++  @ApiPropertyOptional({
++    description:
++      'Encoding quality for transformed or legacy images; absent on originals.',
++    minimum: 1,
++    maximum: 100,
++    type: 'integer',
++    example: 85,
++  })
++  quality?: number;
+ 
+   @ApiProperty({
+     description: 'Uploaded file size in bytes.',
+@@ -56,12 +95,12 @@ export class ImageResponseDto {
+   })
+   originalSize: number;
+ 
+-  @ApiProperty({
+-    description: 'Processed file size in bytes.',
++  @ApiPropertyOptional({
++    description: 'Processed file size in bytes; absent on originals.',
+     type: 'integer',
+     example: 184320,
+   })
+-  processedSize: number;
++  processedSize?: number;
+ 
+   @ApiProperty({ format: 'date-time', example: '2026-09-17T12:00:00.000Z' })
+   createdAt: string;
+diff --git a/src/images/images.controller.ts b/src/images/images.controller.ts
+index 5aae694..54a4cbc 100644
+--- a/src/images/images.controller.ts
++++ b/src/images/images.controller.ts
+@@ -11,6 +11,9 @@ import {
+   ApiNotFoundResponse,
+   ApiParam,
+   ApiInternalServerErrorResponse,
++  ApiBadGatewayResponse,
++  ApiConflictResponse,
++  ApiUnprocessableEntityResponse,
+ } from '@nestjs/swagger';
+ import { ImageResponseDto } from './dto/image-response.dto';
+ import {
+@@ -20,7 +23,7 @@ import {
+   ParseFilePipe,
+   Get,
+   Post,
+-  Query,
++  Body,
+   Param,
+   Req,
+   UploadedFile,
+@@ -50,9 +53,9 @@ export class ImagesController {
+ 
+   @Post('upload')
+   @ApiOperation({
+-    summary: 'Upload and transform an image',
++    summary: 'Upload an original image',
+     description:
+-      'Upload a JPEG, PNG, or WebP image smaller than 5 MiB (5,242,880 bytes). Optional transformations are query parameters. Store the processed image in S3 and return its metadata.',
++      'Upload a JPEG, PNG, or WebP image smaller than 5 MiB (5,242,880 bytes). Preserve its original bytes in S3 and return metadata. To resize or convert it, use POST /images/{id}/transform with the returned ID.',
+   })
+   @ApiConsumes('multipart/form-data')
+   @ApiBody({
+@@ -71,16 +74,17 @@ export class ImagesController {
+     },
+   })
+   @ApiCreatedResponse({
+-    description: 'Image processed and stored successfully.',
++    description: 'Original image stored successfully.',
+     type: ImageResponseDto,
+   })
+   @ApiBadRequestResponse({
+     description:
+-      'Missing file, unsupported file type, file size at or above 5 MiB, invalid transformation values, or unexpected query properties.',
++      'Missing file, unsupported file type, or file size at or above 5 MiB.',
+   })
+   @ApiInternalServerErrorResponse({
+-    description: 'Image processing, storage, or database operation failed.',
++    description: 'Unable to save image metadata.',
+   })
++  @ApiBadGatewayResponse({ description: 'Unable to upload image to storage.' })
+   @UseGuards(JwtAuthGuard)
+   @UseInterceptors(
+     FileInterceptor('file', {
+@@ -96,25 +100,71 @@ export class ImagesController {
+           }),
+           new FileTypeValidator({
+             fileType: /^image\/(jpeg|png|webp)$/,
++            overrideMimeType: true,
+           }),
+         ],
+       }),
+     )
+     file: Express.Multer.File,
+-    @Query() transformations: TransformImageDto,
+     @Req() request: AuthenticatedRequest,
+   ) {
+-    return this.imagesService.resizeImage(
+-      file,
++    return this.imagesService.uploadImage(file, request.user!.sub);
++  }
++  @Post(':id/transform')
++  @ApiOperation({
++    summary: 'Create a transformed version of an original image',
++    description:
++      'Retrieve an owned original from S3, apply resize, quality, and format options, and save a separate version. Send an empty JSON object to use defaults (width 800, quality 80, WebP). Repeated requests always use the original bytes and create independent versions.',
++  })
++  @ApiParam({
++    name: 'id',
++    description: 'MongoDB ID of the original image returned by upload.',
++    example: '66e83a109af861ce27c86a02',
++  })
++  @ApiBody({ type: TransformImageDto })
++  @ApiCreatedResponse({
++    description:
++      'Transformed version stored successfully, linked through originalImageId.',
++    type: ImageResponseDto,
++  })
++  @ApiBadRequestResponse({
++    description:
++      'Invalid transformation values, unexpected body properties, or an ID that identifies a transformed version.',
++  })
++  @ApiNotFoundResponse({
++    description:
++      'Image not found: invalid ID, nonexistent image, or image owned by another user.',
++  })
++  @ApiConflictResponse({
++    description:
++      'Legacy image has no preserved original. Upload the original again.',
++  })
++  @ApiUnprocessableEntityResponse({
++    description: 'Sharp could not process the original image.',
++  })
++  @ApiBadGatewayResponse({
++    description:
++      'Unable to retrieve the original or upload the transformed image to storage.',
++  })
++  @ApiInternalServerErrorResponse({ description: 'Database operation failed.' })
++  @UseGuards(JwtAuthGuard)
++  async transformImage(
++    @Param('id') id: string,
++    @Body() transformations: TransformImageDto,
++    @Req() request: AuthenticatedRequest,
++  ) {
++    return this.imagesService.transformImage(
++      id,
+       transformations,
+       request.user!.sub,
+     );
+   }
++
+   @Get()
+   @ApiOperation({
+     summary: 'List my images',
+     description:
+-      'Return all image metadata owned by the authenticated user, newest first. Returns an empty array when no images exist.',
++      'Return all originals, transformed versions, and legacy image records owned by the authenticated user, newest first. Group versions by originalImageId. Returns an empty array when no images exist.',
+   })
+   @ApiOkResponse({
+     description: 'Image metadata ordered by creation time descending.',
+@@ -152,7 +202,7 @@ export class ImagesController {
+   @ApiOperation({
+     summary: 'Delete an image',
+     description:
+-      'Delete an owned image from S3 and remove its database record.',
++      'Delete an owned image from S3 and MongoDB. Deleting an original also deletes its transformed versions. Deleting a version leaves the original and other versions intact.',
+   })
+   @ApiParam({
+     name: 'id',
+@@ -174,9 +224,12 @@ export class ImagesController {
+       'Image not found: the identifier is invalid, the image does not exist, or it belongs to another user.',
+   })
+   @ApiInternalServerErrorResponse({
+-    description: 'Storage or database deletion failed.',
++    description: 'Database deletion failed.',
+   })
+   @UseGuards(JwtAuthGuard)
++  @ApiBadGatewayResponse({
++    description: 'Unable to delete image from storage; retry the request.',
++  })
+   @HttpCode(200)
+   async deleteImage(
+     @Param('id') id: string,
+diff --git a/src/images/images.service.ts b/src/images/images.service.ts
+index bdf7638..c74ed72 100644
+--- a/src/images/images.service.ts
++++ b/src/images/images.service.ts
+@@ -1,4 +1,12 @@
+-import { Injectable, NotFoundException } from '@nestjs/common';
++import {
++  BadRequestException,
++  ConflictException,
++  Injectable,
++  InternalServerErrorException,
++  Logger,
++  NotFoundException,
++  UnprocessableEntityException,
++} from '@nestjs/common';
+ import { InjectModel } from '@nestjs/mongoose';
+ import { Model, Types } from 'mongoose';
+ import { randomUUID } from 'node:crypto';
+@@ -10,17 +18,56 @@ import { Image, ImageDocument } from './schemas/image.schema';
+ 
+ @Injectable()
+ export class ImagesService {
++  private readonly logger = new Logger(ImagesService.name);
++
+   constructor(
+     @InjectModel(Image.name)
+     private readonly imageModel: Model<ImageDocument>,
+     private readonly s3Service: S3Service,
+   ) {}
+ 
+-  async resizeImage(
+-    file: Express.Multer.File,
++  async uploadImage(file: Express.Multer.File, userId: string) {
++    // The file validator supplies the MIME type detected from the file bytes.
++    const format = file.mimetype.split('/')[1];
++    if (!['jpeg', 'png', 'webp'].includes(format)) {
++      throw new BadRequestException('Unsupported image type');
++    }
++
++    const filename = `${randomUUID()}.${format}`;
++    const key = `originals/${userId}/${filename}`;
++    await this.s3Service.uploadFile(key, file.buffer, file.mimetype);
++
++    return this.saveUploadedImage({
++      kind: 'original',
++      user: new Types.ObjectId(userId),
++      originalName: file.originalname,
++      filename,
++      path: key,
++      originalKey: key,
++      mimeType: file.mimetype,
++      format,
++      originalSize: file.size,
++    });
++  }
++
++  async transformImage(
++    imageId: string,
+     transformations: TransformImageDto,
+     userId: string,
+   ) {
++    const original = await this.findOneByUser(imageId, userId);
++    if (original.kind === 'transformed') {
++      throw new BadRequestException(
++        'Use the original image ID to transform an image',
++      );
++    }
++    if (original.kind !== 'original' || !original.originalKey) {
++      throw new ConflictException(
++        'Original file is unavailable for this legacy image; upload the original again',
++      );
++    }
++
++    const originalBuffer = await this.s3Service.getFile(original.originalKey);
+     const {
+       width = 800,
+       height,
+@@ -28,59 +75,66 @@ export class ImagesService {
+       format = 'webp',
+     } = transformations;
+ 
+-    let image = sharp(file.buffer).resize({
+-      width,
+-      height,
+-    });
+-
+-    switch (format) {
+-      case 'jpeg':
+-        image = image.jpeg({ quality });
+-        break;
+-
+-      case 'png':
+-        image = image.png({ quality });
+-        break;
+-
+-      case 'webp':
+-        image = image.webp({ quality });
+-        break;
++    let processed: { data: Buffer; info: sharp.OutputInfo };
++    try {
++      // Preserve the existing resize defaults and encoding behavior.
++      processed = await sharp(originalBuffer)
++        .resize({ width, height })
++        .toFormat(format, { quality })
++        .toBuffer({ resolveWithObject: true });
++    } catch {
++      throw new UnprocessableEntityException(
++        'Unable to process the original image',
++      );
+     }
+ 
+-    const processedImage = await image.toBuffer();
+-
+     const filename = `${randomUUID()}.${format}`;
+-    const key = `processed/${filename}`;
+-
+-    const contentType = format === 'jpeg' ? 'image/jpeg' : `image/${format}`;
+-
+-    await this.s3Service.uploadFile(key, processedImage, contentType);
+-
+-    const savedImage = await this.imageModel.create({
++    const key = `transformed/${userId}/${original._id.toString()}/${filename}`;
++    const mimeType = `image/${format}`;
++    await this.s3Service.uploadFile(key, processed.data, mimeType);
++
++    return this.saveUploadedImage({
++      kind: 'transformed',
++      originalImageId: original._id,
++      originalKey: original.originalKey,
+       user: new Types.ObjectId(userId),
+-      originalName: file.originalname,
++      originalName: original.originalName,
+       filename,
+       path: key,
++      mimeType,
+       format,
+-      width,
+-      height,
++      // Actual output dimensions allow the frontend to display each version.
++      width: processed.info.width,
++      height: processed.info.height,
+       quality,
+-      originalSize: file.size,
+-      processedSize: processedImage.length,
++      originalSize: original.originalSize,
++      processedSize: processed.data.length,
+     });
++  }
+ 
+-    return savedImage;
++  private async saveUploadedImage(metadata: Image) {
++    try {
++      return await this.imageModel.create(metadata);
++    } catch {
++      // Compensate for a failed database write after a successful S3 upload.
++      try {
++        await this.s3Service.deleteFile(metadata.path);
++      } catch {
++        this.logger.error(
++          'Failed to clean up an image after metadata persistence failed',
++        );
++      }
++      throw new InternalServerErrorException('Unable to save image metadata');
++    }
+   }
++
+   async findAllByUser(userId: string) {
+     return this.imageModel
+-      .find({
+-        user: new Types.ObjectId(userId),
+-      })
+-      .sort({
+-        createdAt: -1,
+-      })
++      .find({ user: new Types.ObjectId(userId) })
++      .sort({ createdAt: -1 })
+       .exec();
+   }
++
+   async findOneByUser(imageId: string, userId: string) {
+     if (!Types.ObjectId.isValid(imageId)) {
+       throw new NotFoundException('Image not found');
+@@ -96,21 +150,32 @@ export class ImagesService {
+     if (!image) {
+       throw new NotFoundException('Image not found');
+     }
+-
+     return image;
+   }
++
+   async removeByUser(imageId: string, userId: string) {
+     const image = await this.findOneByUser(imageId, userId);
++    if (image.kind === 'original') {
++      const versions = await this.imageModel
++        .find({ originalImageId: image._id, user: new Types.ObjectId(userId) })
++        .exec();
++      // Keep the original until its versions have been removed. A failed delete
++      // leaves remaining metadata available for a retry.
++      for (const version of versions) {
++        await this.s3Service.deleteFile(version.path);
++        await this.imageModel.deleteOne({
++          _id: version._id,
++          user: new Types.ObjectId(userId),
++        });
++      }
++    }
+ 
+     await this.s3Service.deleteFile(image.path);
+-
+     await this.imageModel.deleteOne({
+       _id: image._id,
+       user: new Types.ObjectId(userId),
+     });
+ 
+-    return {
+-      message: 'Image deleted successfully',
+-    };
++    return { message: 'Image deleted successfully' };
+   }
+ }
+diff --git a/src/images/schemas/image.schema.ts b/src/images/schemas/image.schema.ts
+index d1948f4..d688de0 100644
+--- a/src/images/schemas/image.schema.ts
++++ b/src/images/schemas/image.schema.ts
+@@ -8,6 +8,35 @@ export type ImageDocument = HydratedDocument<Image>;
+   versionKey: false,
+ })
+ export class Image {
++  // No default: records created before original preservation remain identifiable.
++  @Prop({ enum: ['original', 'transformed'] })
++  kind?: 'original' | 'transformed';
++
++  @Prop({
++    type: Types.ObjectId,
++    ref: 'Image',
++    index: true,
++    required: function (this: Image) {
++      return this.kind === 'transformed';
++    },
++  })
++  originalImageId?: Types.ObjectId;
++
++  @Prop({
++    required: function (this: Image) {
++      return this.kind !== undefined;
++    },
++  })
++  originalKey?: string;
++
++  @Prop({
++    enum: ['image/jpeg', 'image/png', 'image/webp'],
++    required: function (this: Image) {
++      return this.kind !== undefined;
++    },
++  })
++  mimeType?: string;
++
+   @Prop({
+     type: Types.ObjectId,
+     ref: 'User',
+@@ -43,11 +72,13 @@ export class Image {
+   height?: number;
+ 
+   @Prop({
+-    required: true,
++    required: function (this: Image) {
++      return this.kind === 'transformed';
++    },
+     min: 1,
+     max: 100,
+   })
+-  quality: number;
++  quality?: number;
+ 
+   @Prop({
+     required: true,
+@@ -55,9 +86,11 @@ export class Image {
+   originalSize: number;
+ 
+   @Prop({
+-    required: true,
++    required: function (this: Image) {
++      return this.kind === 'transformed';
++    },
+   })
+-  processedSize: number;
++  processedSize?: number;
+ }
+ 
+ export const ImageSchema = SchemaFactory.createForClass(Image);
+diff --git a/src/s3/s3.service.ts b/src/s3/s3.service.ts
+index 399b6ff..3050bca 100644
+--- a/src/s3/s3.service.ts
++++ b/src/s3/s3.service.ts
+@@ -1,7 +1,8 @@
+-import { Injectable } from '@nestjs/common';
++import { BadGatewayException, Injectable } from '@nestjs/common';
+ import { ConfigService } from '@nestjs/config';
+ import {
+   DeleteObjectCommand,
++  GetObjectCommand,
+   PutObjectCommand,
+   S3Client,
+ } from '@aws-sdk/client-s3';
+@@ -30,22 +31,46 @@ export class S3Service {
+     buffer: Buffer,
+     contentType: string,
+   ): Promise<void> {
+-    await this.s3Client.send(
+-      new PutObjectCommand({
+-        Bucket: this.bucketName,
+-        Key: key,
+-        Body: buffer,
+-        ContentType: contentType,
+-      }),
+-    );
++    try {
++      await this.s3Client.send(
++        new PutObjectCommand({
++          Bucket: this.bucketName,
++          Key: key,
++          Body: buffer,
++          ContentType: contentType,
++        }),
++      );
++    } catch {
++      throw new BadGatewayException('Unable to upload image to storage');
++    }
++  }
++
++  async getFile(key: string): Promise<Buffer> {
++    try {
++      const response = await this.s3Client.send(
++        new GetObjectCommand({ Bucket: this.bucketName, Key: key }),
++      );
++
++      if (!response.Body) {
++        throw new Error('Missing object body');
++      }
++
++      return Buffer.from(await response.Body.transformToByteArray());
++    } catch {
++      throw new BadGatewayException('Unable to retrieve image from storage');
++    }
+   }
+ 
+   async deleteFile(key: string): Promise<void> {
+-    await this.s3Client.send(
+-      new DeleteObjectCommand({
+-        Bucket: this.bucketName,
+-        Key: key,
+-      }),
+-    );
++    try {
++      await this.s3Client.send(
++        new DeleteObjectCommand({
++          Bucket: this.bucketName,
++          Key: key,
++        }),
++      );
++    } catch {
++      throw new BadGatewayException('Unable to delete image from storage');
++    }
+   }
+ }
+diff --git a/test/jest-commonjs-transformer.cjs b/test/jest-commonjs-transformer.cjs
+index f8f4286..b8da98f 100644
+--- a/test/jest-commonjs-transformer.cjs
++++ b/test/jest-commonjs-transformer.cjs
+@@ -1,11 +1,25 @@
+ const ts = require('typescript');
+ const { pathToFileURL } = require('node:url');
++const { createHash } = require('node:crypto');
++const { readFileSync } = require('node:fs');
+ 
+ // NestJS 12's ESM dependencies need CommonJS output inside Jest, including
+ // import.meta.url used by their createRequire calls. Application code is
+ // still compiled by ts-jest with the project's NodeNext settings.
+ module.exports = {
++  getCacheKey(sourceText, sourcePath, options) {
++    return createHash('sha256')
++      .update(sourceText)
++      .update(sourcePath)
++      .update(options.configString)
++      .update(readFileSync(__filename))
++      .digest('hex');
++  },
+   process(sourceText, sourcePath) {
++    // Swagger's ESM binding must not collide with Jest's require parameter.
++    const hasLocalRequire = /\bconst require = createRequire\(/.test(
++      sourceText,
++    );
+     const result = ts.transpileModule(sourceText, {
+       fileName: sourcePath,
+       compilerOptions: {
+@@ -18,6 +32,13 @@ module.exports = {
+         before: [
+           (context) => {
+             const visit = (node) => {
++              if (
++                hasLocalRequire &&
++                ts.isIdentifier(node) &&
++                node.text === 'require'
++              ) {
++                return context.factory.createIdentifier('esmRequire');
++              }
+               if (
+                 ts.isPropertyAccessExpression(node) &&
+                 ts.isMetaProperty(node.expression) &&

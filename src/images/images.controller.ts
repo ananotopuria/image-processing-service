@@ -11,6 +11,9 @@ import {
   ApiNotFoundResponse,
   ApiParam,
   ApiInternalServerErrorResponse,
+  ApiBadGatewayResponse,
+  ApiConflictResponse,
+  ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
 import { ImageResponseDto } from './dto/image-response.dto';
 import {
@@ -20,7 +23,7 @@ import {
   ParseFilePipe,
   Get,
   Post,
-  Query,
+  Body,
   Param,
   Req,
   UploadedFile,
@@ -50,9 +53,9 @@ export class ImagesController {
 
   @Post('upload')
   @ApiOperation({
-    summary: 'Upload and transform an image',
+    summary: 'Upload an original image',
     description:
-      'Upload a JPEG, PNG, or WebP image smaller than 5 MiB (5,242,880 bytes). Optional transformations are query parameters. Store the processed image in S3 and return its metadata.',
+      'Upload a JPEG, PNG, or WebP image smaller than 5 MiB (5,242,880 bytes). Preserve its original bytes in S3 and return metadata. To resize or convert it, use POST /images/{id}/transform with the returned ID.',
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -71,16 +74,17 @@ export class ImagesController {
     },
   })
   @ApiCreatedResponse({
-    description: 'Image processed and stored successfully.',
+    description: 'Original image stored successfully.',
     type: ImageResponseDto,
   })
   @ApiBadRequestResponse({
     description:
-      'Missing file, unsupported file type, file size at or above 5 MiB, invalid transformation values, or unexpected query properties.',
+      'Missing file, unsupported file type, or file size at or above 5 MiB.',
   })
   @ApiInternalServerErrorResponse({
-    description: 'Image processing, storage, or database operation failed.',
+    description: 'Unable to save image metadata.',
   })
+  @ApiBadGatewayResponse({ description: 'Unable to upload image to storage.' })
   @UseGuards(JwtAuthGuard)
   @UseInterceptors(
     FileInterceptor('file', {
@@ -96,25 +100,71 @@ export class ImagesController {
           }),
           new FileTypeValidator({
             fileType: /^image\/(jpeg|png|webp)$/,
+            overrideMimeType: true,
           }),
         ],
       }),
     )
     file: Express.Multer.File,
-    @Query() transformations: TransformImageDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.imagesService.resizeImage(
-      file,
+    return this.imagesService.uploadImage(file, request.user!.sub);
+  }
+  @Post(':id/transform')
+  @ApiOperation({
+    summary: 'Create a transformed version of an original image',
+    description:
+      'Retrieve an owned original from S3, apply resize, quality, and format options, and save a separate version. Send an empty JSON object to use defaults (width 800, quality 80, WebP). Repeated requests always use the original bytes and create independent versions.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'MongoDB ID of the original image returned by upload.',
+    example: '66e83a109af861ce27c86a02',
+  })
+  @ApiBody({ type: TransformImageDto })
+  @ApiCreatedResponse({
+    description:
+      'Transformed version stored successfully, linked through originalImageId.',
+    type: ImageResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Invalid transformation values, unexpected body properties, or an ID that identifies a transformed version.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Image not found: invalid ID, nonexistent image, or image owned by another user.',
+  })
+  @ApiConflictResponse({
+    description:
+      'Legacy image has no preserved original. Upload the original again.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description: 'Sharp could not process the original image.',
+  })
+  @ApiBadGatewayResponse({
+    description:
+      'Unable to retrieve the original or upload the transformed image to storage.',
+  })
+  @ApiInternalServerErrorResponse({ description: 'Database operation failed.' })
+  @UseGuards(JwtAuthGuard)
+  async transformImage(
+    @Param('id') id: string,
+    @Body() transformations: TransformImageDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.transformImage(
+      id,
       transformations,
       request.user!.sub,
     );
   }
+
   @Get()
   @ApiOperation({
     summary: 'List my images',
     description:
-      'Return all image metadata owned by the authenticated user, newest first. Returns an empty array when no images exist.',
+      'Return all originals, transformed versions, and legacy image records owned by the authenticated user, newest first. Group versions by originalImageId. Returns an empty array when no images exist.',
   })
   @ApiOkResponse({
     description: 'Image metadata ordered by creation time descending.',
@@ -152,7 +202,7 @@ export class ImagesController {
   @ApiOperation({
     summary: 'Delete an image',
     description:
-      'Delete an owned image from S3 and remove its database record.',
+      'Delete an owned image from S3 and MongoDB. Deleting an original also deletes its transformed versions. Deleting a version leaves the original and other versions intact.',
   })
   @ApiParam({
     name: 'id',
@@ -174,9 +224,12 @@ export class ImagesController {
       'Image not found: the identifier is invalid, the image does not exist, or it belongs to another user.',
   })
   @ApiInternalServerErrorResponse({
-    description: 'Storage or database deletion failed.',
+    description: 'Database deletion failed.',
   })
   @UseGuards(JwtAuthGuard)
+  @ApiBadGatewayResponse({
+    description: 'Unable to delete image from storage; retry the request.',
+  })
   @HttpCode(200)
   async deleteImage(
     @Param('id') id: string,
