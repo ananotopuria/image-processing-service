@@ -1,6 +1,68 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ImageTransformationsDto } from './transform-image.dto';
 
 export class ImageResponseDto {
+  @ApiProperty({
+    description:
+      'Temporary HTTPS URL for displaying this file. Valid for up to 15 minutes; treat as a bearer link. Refresh using GET /api/images/{id}.',
+    format: 'uri',
+    example:
+      'https://example-bucket.s3.amazonaws.com/originals/user/image.jpeg?X-Amz-Signature=example',
+  })
+  url: string;
+
+  @ApiProperty({
+    description: 'Temporary URL that downloads this file as an attachment.',
+    format: 'uri',
+    example:
+      'https://example-bucket.s3.amazonaws.com/originals/user/image.jpeg?response-content-disposition=attachment&X-Amz-Signature=example',
+  })
+  downloadUrl: string;
+
+  @ApiProperty({
+    description:
+      'URL expiration time. Credentials or bucket policy may expire access sooner.',
+    format: 'date-time',
+    example: '2026-09-18T12:15:00.000Z',
+  })
+  urlExpiresAt: string;
+
+  @ApiPropertyOptional({
+    type: ImageTransformationsDto,
+    description:
+      'Applied operations, including resolved format/quality and crop offset defaults. Absent on originals and versions created before Day 2.',
+  })
+  transformations?: ImageTransformationsDto;
+
+  @ApiPropertyOptional({
+    description:
+      'Record type. Absent on legacy records created before originals were preserved.',
+    enum: ['original', 'transformed'],
+    example: 'original',
+  })
+  kind?: 'original' | 'transformed';
+
+  @ApiPropertyOptional({
+    description: 'Original image ID. Present only on transformed versions.',
+    example: '66e83a109af861ce27c86a02',
+  })
+  originalImageId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'S3 key of the preserved original; shared by its versions. Absent on legacy records.',
+    example:
+      'originals/66e83a109af861ce27c86a01/9c1c0381-01af-4210-970c-68292d28c577.jpeg',
+  })
+  originalKey?: string;
+
+  @ApiPropertyOptional({
+    description: 'MIME type of this stored file. Absent on legacy records.',
+    enum: ['image/jpeg', 'image/png', 'image/webp'],
+    example: 'image/jpeg',
+  })
+  mimeType?: string;
+
   @ApiProperty({
     description: 'Image identifier.',
     example: '66e83a109af861ce27c86a02',
@@ -17,22 +79,25 @@ export class ImageResponseDto {
   originalName: string;
 
   @ApiProperty({
-    description: 'Generated output filename.',
-    example: '9c1c0381-01af-4210-970c-68292d28c577.webp',
+    description: 'Generated filename for this original or transformed version.',
+    example: '9c1c0381-01af-4210-970c-68292d28c577.jpeg',
   })
   filename: string;
 
   @ApiProperty({
-    description: 'S3 object key, not a download URL.',
-    example: 'processed/9c1c0381-01af-4210-970c-68292d28c577.webp',
+    description:
+      'S3 key for this file, not a download URL. Originals use originals/{userId}/; versions use transformed/{userId}/{originalImageId}/.',
+    example:
+      'originals/66e83a109af861ce27c86a01/9c1c0381-01af-4210-970c-68292d28c577.jpeg',
   })
   path: string;
 
-  @ApiProperty({ enum: ['jpeg', 'png', 'webp'], example: 'webp' })
+  @ApiProperty({ enum: ['jpeg', 'png', 'webp'], example: 'jpeg' })
   format: string;
 
   @ApiPropertyOptional({
-    description: 'Stored target width in pixels.',
+    description:
+      'Actual output width in pixels for transformed versions. Legacy records store the requested width.',
     type: 'integer',
     example: 1200,
   })
@@ -40,14 +105,21 @@ export class ImageResponseDto {
 
   @ApiPropertyOptional({
     description:
-      'Stored target height in pixels; omitted when no height was requested.',
+      'Actual output height in pixels for transformed versions. Legacy records store the requested height, if any.',
     type: 'integer',
     example: 800,
   })
   height?: number;
 
-  @ApiProperty({ minimum: 1, maximum: 100, type: 'integer', example: 85 })
-  quality: number;
+  @ApiPropertyOptional({
+    description:
+      'Encoding quality for transformed or legacy images; absent on originals.',
+    minimum: 1,
+    maximum: 100,
+    type: 'integer',
+    example: 85,
+  })
+  quality?: number;
 
   @ApiProperty({
     description: 'Uploaded file size in bytes.',
@@ -56,12 +128,12 @@ export class ImageResponseDto {
   })
   originalSize: number;
 
-  @ApiProperty({
-    description: 'Processed file size in bytes.',
+  @ApiPropertyOptional({
+    description: 'Processed file size in bytes; absent on originals.',
     type: 'integer',
     example: 184320,
   })
-  processedSize: number;
+  processedSize?: number;
 
   @ApiProperty({ format: 'date-time', example: '2026-09-17T12:00:00.000Z' })
   createdAt: string;

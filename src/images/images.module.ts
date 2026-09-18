@@ -5,6 +5,7 @@ import { AuthModule } from '../auth/auth.module';
 import { S3Module } from '../s3/s3.module';
 import { ImagesController } from './images.controller';
 import { ImagesService } from './images.service';
+import { UserThrottlerGuard } from './guards/user-throttler.guard';
 import { Image, ImageSchema } from './schemas/image.schema';
 
 @Module({
@@ -19,6 +20,6 @@ import { Image, ImageSchema } from './schemas/image.schema';
     S3Module,
   ],
   controllers: [ImagesController],
-  providers: [ImagesService],
+  providers: [ImagesService, UserThrottlerGuard],
 })
 export class ImagesModule {}

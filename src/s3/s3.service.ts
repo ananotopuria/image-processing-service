@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { BadGatewayException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -30,22 +32,76 @@ export class S3Service {
     buffer: Buffer,
     contentType: string,
   ): Promise<void> {
-    await this.s3Client.send(
-      new PutObjectCommand({
-        Bucket: this.bucketName,
-        Key: key,
-        Body: buffer,
-        ContentType: contentType,
-      }),
-    );
+    try {
+      await this.s3Client.send(
+        new PutObjectCommand({
+          Bucket: this.bucketName,
+          Key: key,
+          Body: buffer,
+          ContentType: contentType,
+        }),
+      );
+    } catch {
+      throw new BadGatewayException('Unable to upload image to storage');
+    }
+  }
+
+  async getFile(key: string): Promise<Buffer> {
+    try {
+      const response = await this.s3Client.send(
+        new GetObjectCommand({ Bucket: this.bucketName, Key: key }),
+      );
+
+      if (!response.Body) {
+        throw new Error('Missing object body');
+      }
+
+      return Buffer.from(await response.Body.transformToByteArray());
+    } catch {
+      throw new BadGatewayException('Unable to retrieve image from storage');
+    }
+  }
+
+  async getFileUrls(key: string) {
+    const expiresIn = 15 * 60;
+    const signingDate = new Date();
+    try {
+      const [url, downloadUrl] = await Promise.all(
+        ['inline', 'attachment'].map((disposition) =>
+          getSignedUrl(
+            this.s3Client,
+            new GetObjectCommand({
+              Bucket: this.bucketName,
+              Key: key,
+              ResponseContentDisposition: disposition,
+              ResponseCacheControl: 'private, no-store',
+            }),
+            { expiresIn, signingDate },
+          ),
+        ),
+      );
+      return {
+        url,
+        downloadUrl,
+        urlExpiresAt: new Date(
+          signingDate.getTime() + expiresIn * 1000,
+        ).toISOString(),
+      };
+    } catch {
+      throw new BadGatewayException('Unable to create image access URLs');
+    }
   }
 
   async deleteFile(key: string): Promise<void> {
-    await this.s3Client.send(
-      new DeleteObjectCommand({
-        Bucket: this.bucketName,
-        Key: key,
-      }),
-    );
+    try {
+      await this.s3Client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucketName,
+          Key: key,
+        }),
+      );
+    } catch {
+      throw new BadGatewayException('Unable to delete image from storage');
+    }
   }
 }

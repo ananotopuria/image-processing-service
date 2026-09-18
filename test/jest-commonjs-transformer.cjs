@@ -1,11 +1,25 @@
 const ts = require('typescript');
 const { pathToFileURL } = require('node:url');
+const { createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
 
 // NestJS 12's ESM dependencies need CommonJS output inside Jest, including
 // import.meta.url used by their createRequire calls. Application code is
 // still compiled by ts-jest with the project's NodeNext settings.
 module.exports = {
+  getCacheKey(sourceText, sourcePath, options) {
+    return createHash('sha256')
+      .update(sourceText)
+      .update(sourcePath)
+      .update(options.configString)
+      .update(readFileSync(__filename))
+      .digest('hex');
+  },
   process(sourceText, sourcePath) {
+    // Swagger's ESM binding must not collide with Jest's require parameter.
+    const hasLocalRequire = /\bconst require = createRequire\(/.test(
+      sourceText,
+    );
     const result = ts.transpileModule(sourceText, {
       fileName: sourcePath,
       compilerOptions: {
@@ -18,6 +32,13 @@ module.exports = {
         before: [
           (context) => {
             const visit = (node) => {
+              if (
+                hasLocalRequire &&
+                ts.isIdentifier(node) &&
+                node.text === 'require'
+              ) {
+                return context.factory.createIdentifier('esmRequire');
+              }
               if (
                 ts.isPropertyAccessExpression(node) &&
                 ts.isMetaProperty(node.expression) &&
