@@ -10,10 +10,14 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { randomUUID } from 'node:crypto';
+import { instanceToPlain } from 'class-transformer';
 import sharp from 'sharp';
 
 import { S3Service } from '../s3/s3.service';
-import { TransformImageDto } from './dto/transform-image.dto';
+import {
+  ImageTransformationsDto,
+  TransformImageDto,
+} from './dto/transform-image.dto';
 import { Image, ImageDocument } from './schemas/image.schema';
 
 @Injectable()
@@ -52,7 +56,7 @@ export class ImagesService {
 
   async transformImage(
     imageId: string,
-    transformations: TransformImageDto,
+    request: TransformImageDto,
     userId: string,
   ) {
     const original = await this.findOneByUser(imageId, userId);
@@ -68,23 +72,113 @@ export class ImagesService {
     }
 
     const originalBuffer = await this.s3Service.getFile(original.originalKey);
+    // Remove unset DTO fields, including nested ones, before storing a recipe
+    // that clients can send back as a valid transformation request.
+    const transformations = instanceToPlain(request.transformations, {
+      exposeUnsetFields: false,
+    }) as ImageTransformationsDto;
     const {
-      width = 800,
-      height,
       quality = 80,
       format = 'webp',
+      resize,
+      flip,
+      mirror,
+      rotate,
+      filters,
     } = transformations;
+    const crop = transformations.crop
+      ? {
+          ...transformations.crop,
+          x: transformations.crop.x ?? 0,
+          y: transformations.crop.y ?? 0,
+        }
+      : undefined;
+    const applied = {
+      ...transformations,
+      ...(crop && { crop }),
+      quality,
+      format,
+    };
 
-    let processed: { data: Buffer; info: sharp.OutputInfo };
+    // Decode once, before applying user operations, so damaged originals retain
+    // their 422 response and transformation failures can return useful 400s.
+    let pixels: { data: Buffer; info: sharp.OutputInfo };
     try {
-      // Preserve the existing resize defaults and encoding behavior.
-      processed = await sharp(originalBuffer)
-        .resize({ width, height })
-        .toFormat(format, { quality })
+      pixels = await sharp(originalBuffer)
+        .toColourspace('srgb')
+        .raw()
         .toBuffer({ resolveWithObject: true });
     } catch {
       throw new UnprocessableEntityException(
-        'Unable to process the original image',
+        'Unable to decode the original image',
+      );
+    }
+
+    if (
+      crop &&
+      (crop.x > pixels.info.width - crop.width ||
+        crop.y > pixels.info.height - crop.height)
+    ) {
+      throw new BadRequestException(
+        `Crop rectangle must fit within the original image (${pixels.info.width} x ${pixels.info.height} pixels)`,
+      );
+    }
+
+    // OutputInfo.premultiplied describes work Sharp performed, not the returned
+    // pixels. Pass only raw dimensions/channels when starting the next stage.
+    const fromPixels = () =>
+      sharp(pixels.data, {
+        raw: {
+          width: pixels.info.width,
+          height: pixels.info.height,
+          channels: pixels.info.channels,
+        },
+      });
+
+    let processed: { data: Buffer; info: sharp.OutputInfo };
+    try {
+      // Materialize lossless raw pixels between stages: Sharp may reorder
+      // operations within a single pipeline (especially flip and rotation).
+      let image = fromPixels();
+      if (crop)
+        image = image.extract({
+          left: crop.x,
+          top: crop.y,
+          width: crop.width,
+          height: crop.height,
+        });
+      if (resize)
+        image = image.resize({ width: resize.width, height: resize.height });
+      if (crop || resize) {
+        pixels = await image.raw().toBuffer({ resolveWithObject: true });
+        image = fromPixels();
+      }
+
+      if (flip) image = image.flip();
+      if (mirror) image = image.flop();
+      if (rotate !== undefined)
+        image = image.rotate(rotate, {
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        });
+      if (flip || mirror || rotate !== undefined) {
+        pixels = await image.raw().toBuffer({ resolveWithObject: true });
+        image = fromPixels();
+      }
+
+      if (filters?.grayscale) image = image.grayscale();
+      if (filters?.sepia) {
+        image = image.recomb([
+          [0.393, 0.769, 0.189],
+          [0.349, 0.686, 0.168],
+          [0.272, 0.534, 0.131],
+        ]);
+      }
+      processed = await image
+        .toFormat(format, { quality })
+        .toBuffer({ resolveWithObject: true });
+    } catch {
+      throw new BadRequestException(
+        'Unable to apply transformations; check crop, resize, rotation, and output options',
       );
     }
 
@@ -109,6 +203,7 @@ export class ImagesService {
       quality,
       originalSize: original.originalSize,
       processedSize: processed.data.length,
+      transformations: applied,
     });
   }
 

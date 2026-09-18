@@ -53,6 +53,23 @@ describe('Images API contract', () => {
         },
       },
     });
+    expect(doc.components!.schemas!.TransformImageDto).toMatchObject({
+      required: ['transformations'],
+      properties: {
+        transformations: {
+          allOf: [{ $ref: '#/components/schemas/ImageTransformationsDto' }],
+        },
+      },
+    });
+    expect(doc.components!.schemas!.ImageTransformationsDto).toMatchObject({
+      properties: {
+        resize: { allOf: [{ $ref: '#/components/schemas/ResizeImageDto' }] },
+        crop: { allOf: [{ $ref: '#/components/schemas/CropImageDto' }] },
+        filters: { $ref: '#/components/schemas/ImageFiltersDto' },
+        flip: { type: 'boolean' },
+        mirror: { type: 'boolean' },
+      },
+    });
     expect(transform.security).toEqual([{ bearer: [] }]);
     expect(Object.keys(transform.responses)).toEqual(
       expect.arrayContaining(['201', '400', '401', '404', '409', '422', '502']),
@@ -77,34 +94,96 @@ describe('Images API contract', () => {
     ).toContain(JwtAuthGuard);
   });
 
-  it('accepts existing transform options and coerces numeric values', async () => {
-    const value = await pipe.transform(
-      { width: '1200', height: 800, quality: '85', format: 'jpeg' },
-      { type: 'body', metatype: TransformImageDto },
-    );
-    expect(value).toMatchObject({
-      width: 1200,
-      height: 800,
-      quality: 85,
-      format: 'jpeg',
-    });
-    await expect(
-      pipe.transform({}, { type: 'body', metatype: TransformImageDto }),
-    ).resolves.toEqual({});
-  });
+  it.each([
+    { resize: { width: 1200 } },
+    { resize: { height: 800 } },
+    { resize: { width: 800, height: 600 } },
+    { crop: { width: 500, height: 400, x: 10, y: 20 } },
+    { crop: { width: 1, height: 1 } },
+    { rotate: 90 },
+    { rotate: -12.5 },
+    { rotate: 0 },
+    { flip: false },
+    { mirror: true },
+    { filters: { grayscale: true, sepia: false } },
+    { format: 'png', quality: 1 },
+    { quality: 100 },
+    {
+      resize: { width: 800 },
+      rotate: 90,
+      flip: true,
+      mirror: true,
+      filters: { sepia: true },
+      format: 'webp',
+      quality: 75,
+    },
+  ])(
+    'accepts single and combined nested transformations: %j',
+    async (transformations) => {
+      const body = { transformations };
+      await expect(
+        pipe.transform(body, { type: 'body', metatype: TransformImageDto }),
+      ).resolves.toMatchObject(body);
+    },
+  );
 
   it.each([
-    { width: 0 },
-    { height: 4001 },
-    { width: 12.5 },
-    { quality: 101 },
-    { quality: 0 },
-    { format: 'gif' },
-    { rotate: 90 },
-    { crop: 'center' },
-  ])('rejects invalid or unsupported transform options: %j', async (value) => {
+    {},
+    { width: 800 },
+    { transformations: {} },
+    { transformations: null },
+    { transformations: [] },
+    { transformations: 'rotate' },
+    { transformations: { rotate: 90 }, extra: true },
+    ...[
+      { resize: {} },
+      { resize: null },
+      { resize: [] },
+      { resize: { width: 0 } },
+      { resize: { height: 4001 } },
+      { resize: { width: 12.5 } },
+      { resize: { width: '800' } },
+      { resize: { width: true } },
+      { resize: { width: null } },
+      { resize: { height: null } },
+      { resize: { width: 20, fit: 'fill' } },
+      { crop: {} },
+      { crop: { width: 20 } },
+      { crop: { width: 0, height: 20 } },
+      { crop: { width: 20, height: 20, x: -1 } },
+      { crop: { width: 20, height: 20, y: 0.5 } },
+      { crop: { width: 20, height: 20, x: null } },
+      { crop: { width: 20, height: 20, left: 0 } },
+      { quality: 101 },
+      { quality: 0 },
+      { quality: 2.5 },
+      { quality: '80' },
+      { quality: null },
+      { format: 'gif' },
+      { format: null },
+      { rotate: '90' },
+      { rotate: null },
+      { rotate: 361 },
+      { rotate: -361 },
+      { rotate: Infinity },
+      { rotate: NaN },
+      { flip: 'false' },
+      { flip: null },
+      { mirror: 1 },
+      { mirror: 'true' },
+      { filters: {} },
+      { filters: null },
+      { filters: [] },
+      { filters: { grayscale: 'true' } },
+      { filters: { sepia: 1 } },
+      { filters: { grayscale: null } },
+      { filters: { blur: true } },
+      { watermark: 'text' },
+      { unknown: true },
+    ].map((transformations) => ({ transformations })),
+  ])('rejects invalid, empty, null, or unexpected input: %j', async (body) => {
     await expect(
-      pipe.transform(value, { type: 'body', metatype: TransformImageDto }),
+      pipe.transform(body, { type: 'body', metatype: TransformImageDto }),
     ).rejects.toMatchObject({ status: 400 });
   });
 

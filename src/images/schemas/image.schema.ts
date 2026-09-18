@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
+import type { ImageTransformationsDto } from '../dto/transform-image.dto';
 
 export type ImageDocument = HydratedDocument<Image>;
 
@@ -64,6 +65,10 @@ export class Image {
     enum: ['jpeg', 'png', 'webp'],
   })
   format: string;
+
+  // Validated by the request DTO; absent on original and pre-Day-2 records.
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  transformations?: ImageTransformationsDto;
 
   @Prop()
   width?: number;

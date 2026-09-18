@@ -1,6 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ImageTransformationsDto } from './transform-image.dto';
 
 export class ImageResponseDto {
+  @ApiPropertyOptional({
+    type: ImageTransformationsDto,
+    description:
+      'Applied operations, including resolved format/quality and crop offset defaults. Absent on originals and versions created before Day 2.',
+  })
+  transformations?: ImageTransformationsDto;
+
   @ApiPropertyOptional({
     description:
       'Record type. Absent on legacy records created before originals were preserved.',

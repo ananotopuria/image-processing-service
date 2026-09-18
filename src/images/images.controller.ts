@@ -114,14 +114,41 @@ export class ImagesController {
   @ApiOperation({
     summary: 'Create a transformed version of an original image',
     description:
-      'Retrieve an owned original from S3, apply resize, quality, and format options, and save a separate version. Send an empty JSON object to use defaults (width 800, quality 80, WebP). Repeated requests always use the original bytes and create independent versions.',
+      'Apply one or more nested transformations to an owned original and save a separate version. Order: crop in original pixel coordinates, resize, vertical flip/horizontal mirror, rotate, grayscale, sepia, then encode. Omitted operations are skipped; there is no implicit resize. Output defaults to WebP at quality 80. EXIF orientation is not auto-applied; only the first frame of animated input is processed.',
   })
   @ApiParam({
     name: 'id',
     description: 'MongoDB ID of the original image returned by upload.',
     example: '66e83a109af861ce27c86a02',
   })
-  @ApiBody({ type: TransformImageDto })
+  @ApiBody({
+    type: TransformImageDto,
+    examples: {
+      rotateOnly: {
+        summary: 'Rotate only, without resizing',
+        value: { transformations: { rotate: 90 } },
+      },
+      combined: {
+        summary: 'Resize, rotate, grayscale and encode',
+        value: {
+          transformations: {
+            resize: { width: 800, height: 600 },
+            rotate: 90,
+            mirror: true,
+            filters: { grayscale: true },
+            format: 'webp',
+            quality: 75,
+          },
+        },
+      },
+      crop: {
+        summary: 'Crop in original pixel coordinates',
+        value: {
+          transformations: { crop: { width: 500, height: 400, x: 10, y: 20 } },
+        },
+      },
+    },
+  })
   @ApiCreatedResponse({
     description:
       'Transformed version stored successfully, linked through originalImageId.',
@@ -129,7 +156,7 @@ export class ImagesController {
   })
   @ApiBadRequestResponse({
     description:
-      'Invalid transformation values, unexpected body properties, or an ID that identifies a transformed version.',
+      'Invalid or empty transformations, null values, unexpected properties, crop outside the original, invalid Sharp operations, or an ID that identifies a transformed version.',
   })
   @ApiNotFoundResponse({
     description:
@@ -140,7 +167,7 @@ export class ImagesController {
       'Legacy image has no preserved original. Upload the original again.',
   })
   @ApiUnprocessableEntityResponse({
-    description: 'Sharp could not process the original image.',
+    description: 'The stored original could not be decoded.',
   })
   @ApiBadGatewayResponse({
     description:
