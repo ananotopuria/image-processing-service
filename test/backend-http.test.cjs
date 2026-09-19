@@ -6,7 +6,9 @@ const assert = require('node:assert/strict');
 const { Test } = require('@nestjs/testing');
 const { JwtModule, JwtService } = require('@nestjs/jwt');
 const { ThrottlerModule } = require('@nestjs/throttler');
-const { ValidationPipe, BadGatewayException } = require('@nestjs/common');
+const { BadGatewayException } = require('@nestjs/common');
+const { ConfigService } = require('@nestjs/config');
+const { configureApp, parseCorsOrigins } = require('../dist/app.config');
 const { getModelToken } = require('@nestjs/mongoose');
 const { model } = require('mongoose');
 const request = require('supertest');
@@ -110,6 +112,13 @@ async function setup() {
     ],
     controllers: [AuthController, ImagesController],
     providers: [
+      {
+        provide: ConfigService,
+        useValue: new ConfigService({
+          CORS_ORIGINS:
+            ' http://localhost:5173, , https://frontend.example.test, ',
+        }),
+      },
       AuthService,
       UsersService,
       ImagesService,
@@ -119,14 +128,7 @@ async function setup() {
     ],
   }).compile();
   const app = module.createNestApplication({ logger: false });
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
-  );
+  configureApp(app);
   await app.listen(0, '127.0.0.1');
   return {
     app,
@@ -136,6 +138,7 @@ async function setup() {
     rows,
     storage,
     imageDb,
+    userDb,
     calls,
   };
 }
@@ -147,6 +150,181 @@ async function sampleImage() {
     .png()
     .toBuffer();
 }
+
+test('CORS origins are trimmed, empty entries ignored, and invalid configuration rejected', () => {
+  assert.deepEqual(
+    parseCorsOrigins(
+      ' http://localhost:5173, ,https://frontend.example.test, ',
+    ),
+    ['http://localhost:5173', 'https://frontend.example.test'],
+  );
+  for (const value of [
+    undefined,
+    '',
+    ' , ',
+    '*',
+    'null',
+    'localhost:5173',
+    'ftp://frontend.example.test',
+    'https://*.example.test',
+    'https://frontend.example.test/',
+    'https://frontend.example.test/path',
+    'https://frontend.example.test?query=1',
+    'https://frontend.example.test#fragment',
+    'https://user:password@frontend.example.test',
+    'http://localhost:99999',
+    'http://localhost:5173,invalid',
+  ]) {
+    assert.throws(() => parseCorsOrigins(value), /CORS_ORIGINS/);
+  }
+});
+
+function assertCors(response, origin = 'http://localhost:5173') {
+  assert.equal(response.headers['access-control-allow-origin'], origin);
+  assert.equal(response.headers['access-control-allow-credentials'], undefined);
+  assert.match(response.headers.vary, /\bOrigin\b/);
+  assert.equal(
+    response.headers['access-control-expose-headers'],
+    'Retry-After',
+  );
+}
+
+test('real app CORS handles preflights before guards and only permits configured origins', async () => {
+  const { app, api, jwt } = await setup();
+  try {
+    for (const origin of [
+      'http://localhost:5173',
+      'https://frontend.example.test',
+    ]) {
+      for (const [path, method] of [
+        ['/api/auth/sign-in', 'POST'],
+        ['/api/auth/profile', 'GET'],
+        ['/api/images/some-id', 'DELETE'],
+      ]) {
+        const response = await api
+          .options(path)
+          .set('Origin', origin)
+          .set('Access-Control-Request-Method', method)
+          .set('Access-Control-Request-Headers', 'authorization,content-type')
+          .expect(204);
+        assertCors(response, origin);
+        const methods =
+          response.headers['access-control-allow-methods'].split(',');
+        for (const allowed of ['GET', 'HEAD', 'POST', 'DELETE', 'OPTIONS']) {
+          assert(methods.includes(allowed));
+        }
+        assert.deepEqual(
+          response.headers['access-control-allow-headers']
+            .toLowerCase()
+            .split(',')
+            .sort(),
+          ['authorization', 'content-type'],
+        );
+      }
+      assertCors(
+        await api.get('/api/auth/profile').set('Origin', origin).expect(401),
+        origin,
+      );
+    }
+
+    for (const origin of [
+      'https://unlisted.example.test',
+      'http://localhost:5174',
+      'http://localhost:5173.evil.example.test',
+      'null',
+    ]) {
+      const preflight = await api
+        .options('/api/auth/sign-in')
+        .set('Origin', origin)
+        .set('Access-Control-Request-Method', 'POST')
+        .set('Access-Control-Request-Headers', 'authorization,content-type');
+      assert.equal(preflight.headers['access-control-allow-origin'], undefined);
+      const response = await api
+        .get('/api/auth/profile')
+        .set('Origin', origin)
+        .expect(401);
+      assert.equal(response.headers['access-control-allow-origin'], undefined);
+    }
+
+    await api.get('/api/auth/profile').expect(401);
+    const token = await jwt.signAsync({ sub: '66e83a109af861ce27c86a01' });
+    const response = await api
+      .get('/api/auth/profile')
+      .auth(token, { type: 'bearer' })
+      .expect(200);
+    assert.equal(response.headers['access-control-allow-origin'], undefined);
+    assert.equal(response.body.user.sub, '66e83a109af861ce27c86a01');
+  } finally {
+    await app.close();
+  }
+});
+
+test('allowed origins receive CORS headers on real 400, 401, 409, 429 and 500 responses', async () => {
+  const { app, api, userDb } = await setup();
+  const origin = 'http://localhost:5173';
+  try {
+    // Preflights must not consume the sign-in throttling allowance.
+    for (let i = 0; i < 12; i++) {
+      await api
+        .options('/api/auth/sign-in')
+        .set('Origin', origin)
+        .set('Access-Control-Request-Method', 'POST')
+        .expect(204);
+    }
+    for (let i = 0; i < 10; i++) {
+      assertCors(
+        await api
+          .post('/api/auth/sign-in')
+          .set('Origin', origin)
+          .send({})
+          .expect(400),
+      );
+    }
+    const limited = await api
+      .post('/api/auth/sign-in')
+      .set('Origin', origin)
+      .send({})
+      .expect(429);
+    assertCors(limited);
+    assert(Number(limited.headers['retry-after']) > 0);
+
+    assertCors(
+      await api.get('/api/auth/profile').set('Origin', origin).expect(401),
+    );
+    const credentials = {
+      username: 'cors',
+      email: 'cors@example.test',
+      password: 'ExamplePass123!',
+    };
+    assertCors(
+      await api
+        .post('/api/auth/sign-up')
+        .set('Origin', origin)
+        .send(credentials)
+        .expect(201),
+    );
+    assertCors(
+      await api
+        .post('/api/auth/sign-up')
+        .set('Origin', origin)
+        .send(credentials)
+        .expect(409),
+    );
+
+    userDb.findOne = () => {
+      throw new Error('simulated database failure');
+    };
+    assertCors(
+      await api
+        .post('/api/auth/sign-up')
+        .set('Origin', origin)
+        .send(credentials)
+        .expect(500),
+    );
+  } finally {
+    await app.close();
+  }
+});
 
 test('complete backend flow, ownership, validation, storage failures and private retrieval', async () => {
   const { app, api, jwt, objects, storage, imageDb, calls } = await setup();

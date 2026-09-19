@@ -30,6 +30,36 @@ Default port is 3000; `PORT` can override it.
 Open [Swagger UI](http://localhost:3000/api/docs). Sign up or sign in, then paste
 the returned `accessToken` into Swagger's Authorize dialog.
 
+## Frontend CORS and Render
+
+Set this in local `.env` and in the Render backend service's environment:
+
+```dotenv
+CORS_ORIGINS=http://localhost:5173
+```
+
+`CORS_ORIGINS` is required and accepts comma-separated exact HTTP(S) browser
+origins. Whitespace is trimmed and empty entries are ignored. When your deployed
+frontend URL is known, append its origin after a comma. Use the browser's
+`URL.origin` form (scheme, hostname, and non-default port only), without paths,
+trailing slashes, credentials, queries, fragments, or wildcards. Missing, empty,
+or invalid configuration causes startup to fail with a `CORS_ORIGINS` error.
+Keep `.env` untracked; it is already ignored.
+
+In the Render Dashboard, select the backend service, open **Environment**, and
+add `CORS_ORIGINS` with value `http://localhost:5173`. Save the variable and deploy
+the commit containing this change. **Save, rebuild, and deploy** rebuilds the
+service; **Save only** leaves the variable inactive until the next deployment.
+See [Render's environment variable instructions](https://render.com/docs/configure-environment-variables).
+A backend redeployment is required; local tests do not verify the deployed service.
+
+CORS permits GET, HEAD, POST, DELETE, and OPTIONS with `Authorization` and
+`Content-Type`, and exposes `Retry-After`. Preflights are handled before JWT
+guards; actual protected requests still require a Bearer token. Cookie credentials
+are disabled. Requests without `Origin` continue normally. Unlisted browser
+origins receive no `Access-Control-Allow-Origin` permission; CORS does not replace
+authentication or prevent non-browser clients from calling the API.
+
 ## API
 
 All image routes require Bearer authentication; paths include `/api`.
