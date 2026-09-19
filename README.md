@@ -4,6 +4,14 @@ NestJS backend for authenticated image uploads, transformations, and private S3
 retrieval. Originals are preserved; each transformation creates a separate version
 with metadata in MongoDB.
 
+## 🚀 Live API
+
+Backend API: [https://image-processing-service-s34x.onrender.com](https://image-processing-service-s34x.onrender.com)
+
+## 📚 API Documentation
+
+Swagger UI: [https://image-processing-service-s34x.onrender.com/api/docs](https://image-processing-service-s34x.onrender.com/api/docs)
+
 ## Run locally
 
 Use the Node version in `.nvmrc`.
