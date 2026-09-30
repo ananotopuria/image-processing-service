@@ -11,6 +11,7 @@ import sharp from 'sharp';
 import { plainToInstance } from 'class-transformer';
 import { TransformImageDto } from './dto/transform-image.dto';
 import { ImagesService } from './images.service';
+import { FavoriteDocument } from './schemas/favorite.schema';
 import { ImageDocument } from './schemas/image.schema';
 import { S3Service } from '../s3/s3.service';
 
@@ -27,6 +28,13 @@ describe('ImagesService', () => {
     find: jest.Mock;
     deleteOne: jest.Mock;
     countDocuments: jest.Mock;
+  };
+  let favorites: {
+    find: jest.Mock;
+    updateOne: jest.Mock;
+    deleteOne: jest.Mock;
+    deleteMany: jest.Mock;
+    aggregate: jest.Mock;
   };
   let storage: {
     uploadFile: jest.Mock;
@@ -85,9 +93,30 @@ describe('ImagesService', () => {
       }),
       deleteFile: jest.fn().mockResolvedValue(undefined),
     };
+    const query = {
+      select: jest.fn(),
+      lean: jest.fn(),
+      exec: jest.fn().mockResolvedValue([]),
+    };
+    query.select.mockReturnValue(query);
+    query.lean.mockReturnValue(query);
+    favorites = {
+      find: jest.fn().mockReturnValue(query),
+      updateOne: jest
+        .fn()
+        .mockReturnValue({ exec: jest.fn().mockResolvedValue({}) }),
+      deleteOne: jest
+        .fn()
+        .mockReturnValue({ exec: jest.fn().mockResolvedValue({}) }),
+      deleteMany: jest
+        .fn()
+        .mockReturnValue({ exec: jest.fn().mockResolvedValue({}) }),
+      aggregate: jest.fn(),
+    };
     service = new ImagesService(
       model as unknown as Model<ImageDocument>,
       storage as unknown as S3Service,
+      favorites as unknown as Model<FavoriteDocument>,
     );
   });
 
@@ -100,11 +129,13 @@ describe('ImagesService', () => {
     );
     expect(result).toMatchObject({
       kind: 'original',
-      originalKey: result.path,
       originalSize: buffer.length,
       mimeType: 'image/png',
       format: 'png',
     });
+    expect(result).not.toHaveProperty('path');
+    expect(result).not.toHaveProperty('originalKey');
+    expect(result.isFavorite).toBe(false);
     expect(result).not.toHaveProperty('quality');
     expect(result).not.toHaveProperty('processedSize');
     expect(storage.getFile).not.toHaveBeenCalled();
@@ -114,7 +145,7 @@ describe('ImagesService', () => {
   it('creates distinct originals when the same file is uploaded twice', async () => {
     const first = await service.uploadImage(file(), userId);
     const second = await service.uploadImage(file(), userId);
-    expect(first.path).not.toBe(second.path);
+    expect(first.filename).not.toBe(second.filename);
   });
 
   it.each(['jpeg', 'png', 'webp'] as const)(
@@ -137,7 +168,6 @@ describe('ImagesService', () => {
       expect(result).toMatchObject({
         kind: 'transformed',
         originalImageId: original._id,
-        originalKey: original.originalKey,
         width: 40,
         height: 20,
         quality: 65,
@@ -165,7 +195,7 @@ describe('ImagesService', () => {
       format: 'webp',
     });
     expect(second).toMatchObject({ width: 30, height: 30 });
-    expect(first.path).not.toBe(second.path);
+    expect(first.filename).not.toBe(second.filename);
     expect(storage.getFile.mock.calls).toEqual([
       [original.originalKey],
       [original.originalKey],
@@ -584,6 +614,10 @@ describe('ImagesService', () => {
       [version.path],
       [original.path],
     ]);
+    expect(favorites.deleteMany.mock.calls).toEqual([
+      [{ imageId: version._id }],
+      [{ imageId: original._id }],
+    ]);
     expect(model.deleteOne).toHaveBeenNthCalledWith(1, {
       _id: version._id,
       user: new Types.ObjectId(userId),
@@ -610,6 +644,7 @@ describe('ImagesService', () => {
       BadGatewayException,
     );
     expect(model.deleteOne).not.toHaveBeenCalled();
+    expect(favorites.deleteMany).not.toHaveBeenCalled();
     expect(storage.deleteFile).not.toHaveBeenCalledWith(original.path);
   });
 
@@ -700,5 +735,150 @@ describe('ImagesService', () => {
     );
     expect(model.create).toHaveBeenCalledTimes(1);
     expect(storage.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it('fetches favorite membership once for a whole image page', async () => {
+    const second = { ...original, _id: new Types.ObjectId() };
+    second.toObject = () => ({ ...second, toObject: undefined });
+    const query = {
+      sort: jest.fn(),
+      skip: jest.fn(),
+      limit: jest.fn(),
+      exec: jest.fn().mockResolvedValue([original, second]),
+    };
+    query.sort.mockReturnValue(query);
+    query.skip.mockReturnValue(query);
+    query.limit.mockReturnValue(query);
+    model.find.mockReturnValue(query);
+    favorites.find().exec.mockResolvedValue([{ imageId: second._id }]);
+    favorites.find.mockClear();
+    const result = await service.findAllByUser(userId, { page: 1, limit: 10 });
+    expect(result.items.map((item) => item.isFavorite)).toEqual([false, true]);
+    expect(favorites.find).toHaveBeenCalledTimes(1);
+    expect(favorites.find).toHaveBeenCalledWith({
+      userId: new Types.ObjectId(userId),
+      imageId: { $in: [original._id, second._id] },
+    });
+  });
+
+  it('treats a concurrent duplicate-key upsert as an idempotent success', async () => {
+    favorites.updateOne.mockReturnValue({
+      exec: jest
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('duplicate'), { code: 11000 }),
+        ),
+    });
+    await expect(service.addFavorite(imageId, userId)).resolves.toEqual({
+      imageId,
+      isFavorite: true,
+    });
+    const filter = {
+      userId: new Types.ObjectId(userId),
+      imageId: new Types.ObjectId(imageId),
+    };
+    expect(favorites.updateOne).toHaveBeenCalledWith(
+      filter,
+      { $setOnInsert: filter },
+      { upsert: true },
+    );
+  });
+
+  it('propagates database errors instead of reporting a false favorite success', async () => {
+    const error = new Error('unavailable');
+    favorites.updateOne.mockReturnValue({
+      exec: jest.fn().mockRejectedValue(error),
+    });
+    await expect(service.addFavorite(imageId, userId)).rejects.toBe(error);
+  });
+
+  it('cleans up an addition if the image disappears during the upsert', async () => {
+    model.findOne
+      .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue(original) })
+      .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue(null) });
+    await expect(service.addFavorite(imageId, userId)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(favorites.deleteOne).toHaveBeenCalledWith({
+      userId: new Types.ObjectId(userId),
+      imageId: original._id,
+    });
+  });
+
+  it.each(['addFavorite', 'removeFavorite'] as const)(
+    'rejects invalid/inaccessible IDs before %s touches favorites',
+    async (method) => {
+      await expect(service[method]('bad-id', userId)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(model.findOne).not.toHaveBeenCalled();
+      model.findOne.mockReturnValue({
+        exec: jest.fn().mockResolvedValue(null),
+      });
+      await expect(service[method](imageId, userId)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(favorites.updateOne).not.toHaveBeenCalled();
+      expect(favorites.deleteOne).not.toHaveBeenCalled();
+    },
+  );
+
+  it('counts and paginates accessible favorites in the same aggregation', async () => {
+    Object.assign(model, {
+      collection: { name: 'images' },
+      hydrate: jest.fn().mockReturnValue(original),
+    });
+    favorites.aggregate.mockReturnValue({
+      exec: jest
+        .fn()
+        .mockResolvedValue([{ items: [original], count: [{ total: 3 }] }]),
+    });
+    const result = await service.findFavoritesByUser(userId, {
+      page: 2,
+      limit: 2,
+    });
+    expect(result).toMatchObject({
+      page: 2,
+      limit: 2,
+      total: 3,
+      totalPages: 2,
+      items: [{ isFavorite: true, url: 'https://example.com/image' }],
+    });
+    const pipeline = favorites.aggregate.mock.calls[0][0];
+    expect(pipeline).toEqual([
+      { $match: { userId: new Types.ObjectId(userId) } },
+      {
+        $lookup: {
+          from: 'images',
+          localField: 'imageId',
+          foreignField: '_id',
+          as: 'image',
+        },
+      },
+      { $unwind: '$image' },
+      { $match: { 'image.user': new Types.ObjectId(userId) } },
+      { $replaceRoot: { newRoot: '$image' } },
+      {
+        $facet: {
+          items: [
+            { $sort: { createdAt: -1, _id: -1 } },
+            { $skip: 2 },
+            { $limit: 2 },
+          ],
+          count: [{ $count: 'total' }],
+        },
+      },
+    ]);
+    expect(model.countDocuments).not.toHaveBeenCalled();
+    expect(favorites.find).not.toHaveBeenCalled();
+  });
+
+  it('strips storage keys and unrecognized persistence fields from responses', async () => {
+    original.__v = 12;
+    original.internalSecret = 'private';
+    const result = await service.getImageByUser(imageId, userId);
+    for (const field of ['__v', 'internalSecret', 'path', 'originalKey']) {
+      expect(result).not.toHaveProperty(field);
+    }
   });
 });

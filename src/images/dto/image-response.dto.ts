@@ -3,6 +3,12 @@ import { ImageTransformationsDto } from './transform-image.dto';
 
 export class ImageResponseDto {
   @ApiProperty({
+    description: 'Favorite membership for the authenticated user only.',
+    example: false,
+  })
+  isFavorite: boolean;
+
+  @ApiProperty({
     description:
       'Temporary HTTPS URL for displaying this file. Valid for up to 15 minutes; treat as a bearer link. Refresh using GET /api/images/{id}.',
     format: 'uri',
@@ -49,14 +55,6 @@ export class ImageResponseDto {
   originalImageId?: string;
 
   @ApiPropertyOptional({
-    description:
-      'S3 key of the preserved original; shared by its versions. Absent on legacy records.',
-    example:
-      'originals/66e83a109af861ce27c86a01/9c1c0381-01af-4210-970c-68292d28c577.jpeg',
-  })
-  originalKey?: string;
-
-  @ApiPropertyOptional({
     description: 'MIME type of this stored file. Absent on legacy records.',
     enum: ['image/jpeg', 'image/png', 'image/webp'],
     example: 'image/jpeg',
@@ -83,14 +81,6 @@ export class ImageResponseDto {
     example: '9c1c0381-01af-4210-970c-68292d28c577.jpeg',
   })
   filename: string;
-
-  @ApiProperty({
-    description:
-      'S3 key for this file, not a download URL. Originals use originals/{userId}/; versions use transformed/{userId}/{originalImageId}/.',
-    example:
-      'originals/66e83a109af861ce27c86a01/9c1c0381-01af-4210-970c-68292d28c577.jpeg',
-  })
-  path: string;
 
   @ApiProperty({ enum: ['jpeg', 'png', 'webp'], example: 'jpeg' })
   format: string;

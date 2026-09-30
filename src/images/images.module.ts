@@ -7,10 +7,12 @@ import { ImagesController } from './images.controller';
 import { ImagesService } from './images.service';
 import { UserThrottlerGuard } from './guards/user-throttler.guard';
 import { Image, ImageSchema } from './schemas/image.schema';
+import { Favorite, FavoriteSchema } from './schemas/favorite.schema';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
+      { name: Favorite.name, schema: FavoriteSchema },
       {
         name: Image.name,
         schema: ImageSchema,

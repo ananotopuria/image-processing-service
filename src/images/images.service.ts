@@ -20,6 +20,7 @@ import {
   TransformImageDto,
 } from './dto/transform-image.dto';
 import { Image, ImageDocument } from './schemas/image.schema';
+import { Favorite, FavoriteDocument } from './schemas/favorite.schema';
 
 @Injectable()
 export class ImagesService {
@@ -29,6 +30,8 @@ export class ImagesService {
     @InjectModel(Image.name)
     private readonly imageModel: Model<ImageDocument>,
     private readonly s3Service: S3Service,
+    @InjectModel(Favorite.name)
+    private readonly favoriteModel: Model<FavoriteDocument>,
   ) {}
 
   async uploadImage(file: Express.Multer.File, userId: string) {
@@ -210,7 +213,9 @@ export class ImagesService {
     return this.withAccessUrls(savedImage);
   }
 
-  private async saveUploadedImage(metadata: Image) {
+  private async saveUploadedImage(
+    metadata: Omit<Image, 'createdAt' | 'updatedAt'>,
+  ) {
     try {
       return await this.imageModel.create(metadata);
     } catch {
@@ -226,16 +231,43 @@ export class ImagesService {
     }
   }
 
-  private async withAccessUrls(image: ImageDocument) {
+  private async withAccessUrls(image: ImageDocument, isFavorite = false) {
+    // Explicit public metadata keeps persistence fields and storage keys private.
+    const fields = [
+      '_id',
+      'user',
+      'originalName',
+      'filename',
+      'format',
+      'kind',
+      'originalImageId',
+      'mimeType',
+      'transformations',
+      'width',
+      'height',
+      'quality',
+      'originalSize',
+      'processedSize',
+      'createdAt',
+      'updatedAt',
+    ] as const;
+    const metadata = image.toObject();
     return {
-      ...image.toObject(),
+      ...Object.fromEntries(
+        fields
+          .filter((field) => metadata[field] !== undefined)
+          .map((field) => [field, metadata[field]]),
+      ),
+      isFavorite,
       ...(await this.s3Service.getFileUrls(image.path)),
     };
   }
 
   async getImageByUser(imageId: string, userId: string) {
     // Sign the stored key only after the owner-filtered lookup succeeds.
-    return this.withAccessUrls(await this.findOneByUser(imageId, userId));
+    const image = await this.findOneByUser(imageId, userId);
+    const favorites = await this.favoriteIds(userId, [image._id]);
+    return this.withAccessUrls(image, favorites.has(image._id.toString()));
   }
 
   async findAllByUser(userId: string, { page, limit }: ListImagesDto) {
@@ -249,8 +281,107 @@ export class ImagesService {
         .exec(),
       this.imageModel.countDocuments(filter).exec(),
     ]);
+    const favorites = await this.favoriteIds(
+      userId,
+      images.map((image) => image._id),
+    );
     const items = await Promise.all(
-      images.map((image) => this.withAccessUrls(image)),
+      images.map((image) =>
+        this.withAccessUrls(image, favorites.has(image._id.toString())),
+      ),
+    );
+    return { items, page, limit, total, totalPages: Math.ceil(total / limit) };
+  }
+
+  private async favoriteIds(userId: string, imageIds: Types.ObjectId[]) {
+    if (imageIds.length === 0) return new Set<string>();
+    const favorites = await this.favoriteModel
+      .find({
+        userId: new Types.ObjectId(userId),
+        imageId: { $in: imageIds },
+      })
+      .select('imageId')
+      .lean()
+      .exec();
+    return new Set(favorites.map((favorite) => favorite.imageId.toString()));
+  }
+
+  async addFavorite(imageId: string, userId: string) {
+    const image = await this.findOneByUser(imageId, userId);
+    const filter = { userId: new Types.ObjectId(userId), imageId: image._id };
+    try {
+      await this.favoriteModel
+        .updateOne(filter, { $setOnInsert: filter }, { upsert: true })
+        .exec();
+    } catch (error) {
+      // Concurrent upserts may race on the unique user/image index.
+      if (!(
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 11000
+      )) {
+        throw error;
+      }
+    }
+    // If deletion overlapped the upsert, do not leave a dangling favorite.
+    try {
+      await this.findOneByUser(imageId, userId);
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        await this.favoriteModel.deleteOne(filter).exec();
+      }
+      throw error;
+    }
+    return { imageId: image._id.toString(), isFavorite: true };
+  }
+
+  async removeFavorite(imageId: string, userId: string) {
+    const image = await this.findOneByUser(imageId, userId);
+    await this.favoriteModel
+      .deleteOne({
+        userId: new Types.ObjectId(userId),
+        imageId: image._id,
+      })
+      .exec();
+    return { imageId: image._id.toString(), isFavorite: false };
+  }
+
+  async findFavoritesByUser(userId: string, { page, limit }: ListImagesDto) {
+    // Filter missing/inaccessible images before both pagination and counting.
+    const [result] = await this.favoriteModel
+      .aggregate<{
+        items: Record<string, unknown>[];
+        count: { total: number }[];
+      }>([
+        { $match: { userId: new Types.ObjectId(userId) } },
+        {
+          $lookup: {
+            from: this.imageModel.collection.name,
+            localField: 'imageId',
+            foreignField: '_id',
+            as: 'image',
+          },
+        },
+        { $unwind: '$image' },
+        { $match: { 'image.user': new Types.ObjectId(userId) } },
+        { $replaceRoot: { newRoot: '$image' } },
+        {
+          $facet: {
+            items: [
+              { $sort: { createdAt: -1, _id: -1 } },
+              { $skip: (page - 1) * limit },
+              { $limit: limit },
+            ],
+            count: [{ $count: 'total' }],
+          },
+        },
+      ])
+      .exec();
+    const total = result?.count[0]?.total ?? 0;
+    const items = await Promise.all(
+      (result?.items ?? []).map((image) =>
+        this.withAccessUrls(this.imageModel.hydrate(image), true),
+      ),
     );
     return { items, page, limit, total, totalPages: Math.ceil(total / limit) };
   }
@@ -287,6 +418,7 @@ export class ImagesService {
           _id: version._id,
           user: new Types.ObjectId(userId),
         });
+        await this.favoriteModel.deleteMany({ imageId: version._id }).exec();
       }
     }
 
@@ -295,6 +427,8 @@ export class ImagesService {
       _id: image._id,
       user: new Types.ObjectId(userId),
     });
+
+    await this.favoriteModel.deleteMany({ imageId: image._id }).exec();
 
     return { message: 'Image deleted successfully' };
   }

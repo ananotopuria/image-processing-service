@@ -43,7 +43,7 @@ export function configureApp(app: INestApplication): void {
   // Register before routes and guards so preflights and errors get CORS headers.
   app.enableCors({
     origin: origins,
-    methods: ['GET', 'HEAD', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     exposedHeaders: ['Retry-After'],
     credentials: false,

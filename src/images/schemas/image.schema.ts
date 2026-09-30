@@ -9,6 +9,8 @@ export type ImageDocument = HydratedDocument<Image>;
   versionKey: false,
 })
 export class Image {
+  createdAt: Date;
+  updatedAt: Date;
   // No default: records created before original preservation remain identifiable.
   @Prop({ enum: ['original', 'transformed'] })
   kind?: 'original' | 'transformed';
