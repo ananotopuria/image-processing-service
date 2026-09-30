@@ -10,7 +10,7 @@ const { BadGatewayException } = require('@nestjs/common');
 const { ConfigService } = require('@nestjs/config');
 const { configureApp, parseCorsOrigins } = require('../dist/app.config');
 const { getModelToken } = require('@nestjs/mongoose');
-const { model } = require('mongoose');
+const { model, Types } = require('mongoose');
 const request = require('supertest');
 const sharp = require('sharp');
 const { AuthController } = require('../dist/auth/auth.controller');
@@ -21,19 +21,26 @@ const { ImagesController } = require('../dist/images/images.controller');
 const { ImagesService } = require('../dist/images/images.service');
 const { ImageSchema } = require('../dist/images/schemas/image.schema');
 const { S3Service } = require('../dist/s3/s3.service');
+const { FavoriteSchema } = require('../dist/images/schemas/favorite.schema');
+const FavoriteModel = model('HttpTestFavorite', FavoriteSchema);
 const UserModel = model('HttpTestUser', UserSchema);
 const ImageModel = model('HttpTestImage', ImageSchema);
 
 async function setup() {
   const rows = [];
   const users = [];
+  const favorites = [];
   const objects = new Map();
   const calls = { sign: 0, read: 0 };
   const matches = (row, query) =>
-    Object.entries(query).every(
-      ([key, value]) => String(row[key]) === String(value),
+    Object.entries(query).every(([key, value]) =>
+      value && value.$in
+        ? value.$in.some((id) => String(row[key]) === String(id))
+        : String(row[key]) === String(value),
     );
   const imageDb = {
+    collection: { name: ImageModel.collection.name },
+    hydrate: (data) => ImageModel.hydrate(data),
     create: async (data) => {
       const row = new ImageModel({
         ...data,
@@ -75,6 +82,110 @@ async function setup() {
       const index = rows.findIndex((row) => matches(row, query));
       if (index >= 0) rows.splice(index, 1);
     },
+  };
+  const favoriteDb = {
+    updateOne: (query, update) => ({
+      exec: async () => {
+        if (!favorites.some((row) => matches(row, query))) {
+          const row = new FavoriteModel(update.$setOnInsert);
+          await row.validate();
+          favorites.push(row);
+        }
+      },
+    }),
+    deleteOne: (query) => ({
+      exec: async () => {
+        const index = favorites.findIndex((row) => matches(row, query));
+        if (index >= 0) favorites.splice(index, 1);
+      },
+    }),
+    deleteMany: (query) => ({
+      exec: async () => {
+        for (let i = favorites.length - 1; i >= 0; i--) {
+          if (matches(favorites[i], query)) favorites.splice(i, 1);
+        }
+      },
+    }),
+    find: (query) => {
+      const cursor = {
+        select: () => cursor,
+        lean: () => cursor,
+        exec: async () => favorites.filter((row) => matches(row, query)),
+      };
+      return cursor;
+    },
+    // A small interpreter for the aggregation stages used by the service.
+    // Unit tests also assert the actual pipeline's ownership/count placement.
+    aggregate: (pipeline) => ({
+      exec: async () => {
+        const run = (input, stages) =>
+          stages.reduce((data, stage) => {
+            if (stage.$match)
+              return data.filter((row) =>
+                Object.entries(stage.$match).every(([key, value]) => {
+                  const actual = key
+                    .split('.')
+                    .reduce((item, part) => item?.[part], row);
+                  return String(actual) === String(value);
+                }),
+              );
+            if (stage.$lookup) {
+              assert.equal(stage.$lookup.from, ImageModel.collection.name);
+              return data.map((row) => ({
+                ...row,
+                [stage.$lookup.as]: rows
+                  .filter(
+                    (image) =>
+                      String(image[stage.$lookup.foreignField]) ===
+                      String(row[stage.$lookup.localField]),
+                  )
+                  .map((image) => image.toObject()),
+              }));
+            }
+            if (stage.$unwind)
+              return data.flatMap((row) =>
+                row[stage.$unwind.slice(1)].map((value) => ({
+                  ...row,
+                  [stage.$unwind.slice(1)]: value,
+                })),
+              );
+            if (stage.$replaceRoot)
+              return data.map(
+                (row) => row[stage.$replaceRoot.newRoot.slice(1)],
+              );
+            if (stage.$sort)
+              return [...data].sort((a, b) => {
+                for (const [key, direction] of Object.entries(stage.$sort)) {
+                  const left =
+                    a[key] instanceof Date ? a[key].getTime() : String(a[key]);
+                  const right =
+                    b[key] instanceof Date ? b[key].getTime() : String(b[key]);
+                  if (left !== right)
+                    return (left > right ? 1 : -1) * direction;
+                }
+                return 0;
+              });
+            if (stage.$skip !== undefined) return data.slice(stage.$skip);
+            if (stage.$limit !== undefined) return data.slice(0, stage.$limit);
+            if (stage.$count)
+              return data.length ? [{ [stage.$count]: data.length }] : [];
+            if (stage.$facet)
+              return [
+                Object.fromEntries(
+                  Object.entries(stage.$facet).map(([key, stages]) => [
+                    key,
+                    run(data, stages),
+                  ]),
+                ),
+              ];
+            throw new Error('Unsupported test aggregation stage');
+          }, input);
+        return run(
+          favorites.map((row) => row.toObject()),
+          pipeline,
+        );
+      },
+    }),
   };
   const userDb = {
     create: async (data) => {
@@ -124,6 +235,7 @@ async function setup() {
       ImagesService,
       { provide: getModelToken('User'), useValue: userDb },
       { provide: getModelToken('Image'), useValue: imageDb },
+      { provide: getModelToken('Favorite'), useValue: favoriteDb },
       { provide: S3Service, useValue: storage },
     ],
   }).compile();
@@ -138,6 +250,8 @@ async function setup() {
     rows,
     storage,
     imageDb,
+    favorites,
+    favoriteDb,
     userDb,
     calls,
   };
@@ -200,6 +314,7 @@ test('real app CORS handles preflights before guards and only permits configured
         ['/api/auth/sign-in', 'POST'],
         ['/api/auth/profile', 'GET'],
         ['/api/images/some-id', 'DELETE'],
+        ['/api/images/some-id/favorite', 'PUT'],
       ]) {
         const response = await api
           .options(path)
@@ -210,7 +325,14 @@ test('real app CORS handles preflights before guards and only permits configured
         assertCors(response, origin);
         const methods =
           response.headers['access-control-allow-methods'].split(',');
-        for (const allowed of ['GET', 'HEAD', 'POST', 'DELETE', 'OPTIONS']) {
+        for (const allowed of [
+          'GET',
+          'HEAD',
+          'POST',
+          'PUT',
+          'DELETE',
+          'OPTIONS',
+        ]) {
           assert(methods.includes(allowed));
         }
         assert.deepEqual(
@@ -327,7 +449,8 @@ test('allowed origins receive CORS headers on real 400, 401, 409, 429 and 500 re
 });
 
 test('complete backend flow, ownership, validation, storage failures and private retrieval', async () => {
-  const { app, api, jwt, objects, storage, imageDb, calls } = await setup();
+  const { app, api, jwt, objects, rows, storage, imageDb, calls } =
+    await setup();
   try {
     const credentials = {
       username: 'ana',
@@ -407,7 +530,10 @@ test('complete backend flow, ownership, validation, storage failures and private
       .auth(token, { type: 'bearer' })
       .attach('file', bytes, { filename: 'photo.png' })
       .expect(201);
-    assert.deepEqual(objects.get(upload.body.path), bytes);
+    assert.deepEqual(
+      objects.get(rows.find((row) => String(row._id) === upload.body._id).path),
+      bytes,
+    );
     assert(
       upload.body.url && upload.body.downloadUrl && upload.body.urlExpiresAt,
     );
@@ -484,7 +610,10 @@ test('complete backend flow, ownership, validation, storage failures and private
       .expect(201);
     assert.equal(transformed.body.width, 24);
     assert.equal(transformed.body.height, 40);
-    assert.deepEqual(objects.get(upload.body.path), bytes);
+    assert.deepEqual(
+      objects.get(rows.find((row) => String(row._id) === upload.body._id).path),
+      bytes,
+    );
     const page = await api
       .get('/api/images?page=2&limit=1')
       .auth(token, { type: 'bearer' })
@@ -495,7 +624,11 @@ test('complete backend flow, ownership, validation, storage failures and private
       .get(`/api/images/${transformed.body._id}`)
       .auth(token, { type: 'bearer' })
       .expect(200);
-    assert(retrieved.body.url.includes(transformed.body.path));
+    assert(
+      retrieved.body.url.includes(
+        rows.find((row) => String(row._id) === transformed.body._id).path,
+      ),
+    );
     storage.getFile = async () => {
       throw new BadGatewayException('Unable to retrieve image from storage');
     };
@@ -559,6 +692,209 @@ test('real HTTP 429 responses for image transformations and sign-in', async () =
       await api.post('/api/auth/sign-in').send({}).expect(400);
     const authLimit = await api.post('/api/auth/sign-in').send({}).expect(429);
     assert(Number(authLimit.headers['retry-after']) > 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('favorites are authenticated, owner-only, idempotent, paginated and cleaned up', async () => {
+  const { app, api, jwt, imageDb, favoriteDb, favorites, rows, calls } =
+    await setup();
+  const userId = '66e83a109af861ce27c86a01';
+  const otherId = '66e83a109af861ce27c86a09';
+  const token = await jwt.signAsync({ sub: userId });
+  const otherToken = await jwt.signAsync({ sub: otherId });
+  const owned = (req) => req.auth(token, { type: 'bearer' });
+  const other = (req) => req.auth(otherToken, { type: 'bearer' });
+  const create = (user, extra = {}) =>
+    imageDb.create({
+      user,
+      originalName: 'photo.png',
+      filename: 'photo.png',
+      path: 'originals/private/photo.png',
+      originalKey: 'originals/private/photo.png',
+      format: 'png',
+      mimeType: 'image/png',
+      kind: 'original',
+      originalSize: 10,
+      ...extra,
+    });
+  try {
+    const first = await create(userId);
+    const second = await create(userId);
+    await create(userId); // Owned, but never favorited: must not affect favorite total.
+    const foreign = await create(otherId);
+    const version = await create(userId, {
+      kind: 'transformed',
+      originalImageId: first._id,
+      path: 'transformed/private/version.png',
+      quality: 80,
+      processedSize: 8,
+    });
+    // Equal timestamps exercise deterministic ID ordering.
+    for (const row of rows) row.createdAt = new Date('2026-09-01T00:00:00Z');
+    const path = `/api/images/${first._id}/favorite`;
+    for (const req of [
+      api.put(path),
+      api.delete(path),
+      api.get('/api/images/favorites'),
+    ]) {
+      const result = await req.expect(401);
+      assert.equal(result.body.message, 'Authentication token is required');
+    }
+    await api
+      .get('/api/images/favorites')
+      .auth('invalid', { type: 'bearer' })
+      .expect(401);
+    for (const id of ['invalid-id', new Types.ObjectId(), foreign._id]) {
+      for (const method of ['put', 'delete']) {
+        const response = await owned(
+          api[method](`/api/images/${id}/favorite`),
+        ).expect(404);
+        assert.deepEqual(response.body, {
+          message: 'Image not found',
+          error: 'Not Found',
+          statusCode: 404,
+        });
+      }
+    }
+    assert.equal(favorites.length, 0);
+    for (let i = 0; i < 2; i++) {
+      const response = await owned(api.put(path))
+        .send({ userId: otherId })
+        .expect(200);
+      assert.deepEqual(response.body, {
+        imageId: String(first._id),
+        isFavorite: true,
+      });
+    }
+    assert.equal(favorites.length, 1);
+    assert.equal(String(favorites[0].userId), userId); // Body cannot override JWT identity.
+    await owned(api.put(`/api/images/${second._id}/favorite`)).expect(200);
+    await owned(api.put(`/api/images/${version._id}/favorite`)).expect(200);
+    await other(api.put(`/api/images/${foreign._id}/favorite`)).expect(200);
+    await other(api.delete(path)).expect(404);
+    const detail = await owned(api.get(`/api/images/${first._id}`)).expect(200);
+    assert.equal(detail.body.isFavorite, true);
+    const list = await owned(api.get('/api/images')).expect(200);
+    assert.equal(list.body.total, 4);
+    assert.equal(list.body.items.filter((item) => item.isFavorite).length, 3);
+
+    // Simulate stale and inaccessible references, including another user's
+    // reference to the same image (future sharing must not merge memberships).
+    for (const [user, image] of [
+      [userId, new Types.ObjectId()],
+      [userId, foreign._id],
+      [otherId, first._id],
+    ]) {
+      const filter = { userId: new Types.ObjectId(user), imageId: image };
+      await favoriteDb.updateOne(filter, { $setOnInsert: filter }).exec();
+    }
+    const signedBefore = calls.sign;
+    const page1 = await owned(
+      api.get('/api/images/favorites?page=1&limit=2'),
+    ).expect(200);
+    assert.deepEqual(
+      Object.keys(page1.body).sort(),
+      ['items', 'page', 'limit', 'total', 'totalPages'].sort(),
+    );
+    assert.equal(page1.body.total, 3);
+    assert.equal(page1.body.totalPages, 2);
+    assert.equal(page1.body.page, 1);
+    assert.equal(page1.body.limit, 2);
+    assert.deepEqual(
+      page1.body.items.map((item) => item._id),
+      [String(version._id), String(second._id)],
+    );
+    assert.equal(calls.sign - signedBefore, 2);
+    for (const item of page1.body.items) {
+      assert.equal(item.isFavorite, true);
+      assert(item.url && item.downloadUrl && item.urlExpiresAt);
+      for (const field of ['path', 'originalKey', '__v', 'imageId', 'userId'])
+        assert.equal(item[field], undefined);
+    }
+    const page2 = await owned(
+      api.get('/api/images/favorites?page=2&limit=2'),
+    ).expect(200);
+    assert.deepEqual(
+      page2.body.items.map((item) => item._id),
+      [String(first._id)],
+    );
+    const pastEnd = await owned(
+      api.get('/api/images/favorites?page=3&limit=2'),
+    ).expect(200);
+    assert.deepEqual(pastEnd.body, {
+      items: [],
+      page: 3,
+      limit: 2,
+      total: 3,
+      totalPages: 2,
+    });
+    const foreignList = await other(api.get('/api/images/favorites')).expect(
+      200,
+    );
+    assert.equal(foreignList.body.total, 1);
+    assert.deepEqual(
+      foreignList.body.items.map((item) => item._id),
+      [String(foreign._id)],
+    );
+    for (const query of [
+      'page=0',
+      'limit=51',
+      'page=abc',
+      'userId=' + otherId,
+      'page=1&page=2',
+    ]) {
+      await owned(api.get('/api/images/favorites?' + query)).expect(400);
+    }
+    for (let i = 0; i < 2; i++) {
+      const response = await owned(api.delete(path)).expect(200);
+      assert.deepEqual(response.body, {
+        imageId: String(first._id),
+        isFavorite: false,
+      });
+    }
+    assert(
+      favorites.some(
+        (row) =>
+          String(row.imageId) === String(first._id) &&
+          String(row.userId) === otherId,
+      ),
+    );
+    const removed = await owned(api.get(`/api/images/${first._id}`)).expect(
+      200,
+    );
+    assert.equal(removed.body.isFavorite, false);
+    await owned(api.put(path)).expect(200);
+    await owned(api.delete(`/api/images/${version._id}`)).expect(200);
+    assert(
+      !favorites.some((row) => String(row.imageId) === String(version._id)),
+    );
+    assert(favorites.some((row) => String(row.imageId) === String(first._id)));
+    const anotherVersion = await create(userId, {
+      kind: 'transformed',
+      originalImageId: first._id,
+      path: 'transformed/private/another.png',
+      quality: 80,
+      processedSize: 8,
+    });
+    await owned(api.put(`/api/images/${anotherVersion._id}/favorite`)).expect(
+      200,
+    );
+    await owned(api.delete(`/api/images/${first._id}`)).expect(200);
+    for (const id of [first._id, anotherVersion._id]) {
+      assert(!favorites.some((row) => String(row.imageId) === String(id)));
+    }
+    await owned(api.delete(path)).expect(404); // Missing image is safe and retains existing 404 convention.
+    await owned(api.delete(`/api/images/${second._id}/favorite`)).expect(200);
+    const empty = await owned(api.get('/api/images/favorites')).expect(200);
+    assert.deepEqual(empty.body, {
+      items: [],
+      page: 1,
+      limit: 10,
+      total: 0,
+      totalPages: 0,
+    });
   } finally {
     await app.close();
   }

@@ -22,6 +22,7 @@ import {
   ApiPayloadTooLargeResponse,
 } from '@nestjs/swagger';
 import { ImageResponseDto } from './dto/image-response.dto';
+import { FavoriteResponseDto } from './dto/favorite-response.dto';
 import {
   Controller,
   FileTypeValidator,
@@ -29,6 +30,7 @@ import {
   ParseFilePipe,
   Get,
   Post,
+  Put,
   Body,
   Param,
   Req,
@@ -236,6 +238,115 @@ export class ImagesController {
   ) {
     return this.imagesService.findAllByUser(request.user!.sub, pagination);
   }
+  // Keep this static route before GET :id.
+  @Get('favorites')
+  @Header('Cache-Control', 'private, no-store')
+  @ApiOperation({
+    summary: 'List my favorite images',
+    description:
+      'Return only accessible favorites of the authenticated user, ordered by image creation time descending (ID breaks ties). Includes originals and versions with temporary access URLs. Defaults: page 1, limit 10; maximum limit 50. Missing or unowned images are excluded from items and total.',
+  })
+  @ApiOkResponse({
+    type: PaginatedImagesDto,
+    example: {
+      items: [
+        {
+          _id: '66e83a109af861ce27c86a02',
+          user: '66e83a109af861ce27c86a01',
+          originalName: 'mountains.png',
+          filename: '9c1c0381-01af-4210-970c-68292d28c577.png',
+          kind: 'original',
+          mimeType: 'image/png',
+          format: 'png',
+          originalSize: 2457600,
+          createdAt: '2026-09-17T12:00:00.000Z',
+          updatedAt: '2026-09-17T12:00:00.000Z',
+          isFavorite: true,
+          url: 'https://example-bucket.s3.amazonaws.com/image.png?X-Amz-Signature=example',
+          downloadUrl:
+            'https://example-bucket.s3.amazonaws.com/image.png?response-content-disposition=attachment&X-Amz-Signature=example',
+          urlExpiresAt: '2026-09-18T12:15:00.000Z',
+        },
+      ],
+      page: 1,
+      limit: 10,
+      total: 1,
+      totalPages: 1,
+    },
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid pagination values or unknown query parameters.',
+  })
+  @ApiBadGatewayResponse({ description: 'Unable to create image access URLs.' })
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
+  async getMyFavorites(
+    @Query() pagination: ListImagesDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.findFavoritesByUser(
+      request.user!.sub,
+      pagination,
+    );
+  }
+
+  @Put(':id/favorite')
+  @HttpCode(200)
+  @Header('Cache-Control', 'private, no-store')
+  @ApiOperation({
+    summary: 'Favorite an owned image',
+    description:
+      'Idempotent. No request body; user identity comes from the JWT. Originals and versions are favorited independently.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'MongoDB image identifier.',
+    example: '66e83a109af861ce27c86a02',
+  })
+  @ApiOkResponse({
+    type: FavoriteResponseDto,
+    example: { imageId: '66e83a109af861ce27c86a02', isFavorite: true },
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Image not found: invalid ID, nonexistent image, or image owned by another user.',
+  })
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
+  async addFavorite(
+    @Param('id') id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.addFavorite(id, request.user!.sub);
+  }
+
+  @Delete(':id/favorite')
+  @HttpCode(200)
+  @Header('Cache-Control', 'private, no-store')
+  @ApiOperation({
+    summary: 'Remove an owned image from favorites',
+    description:
+      'Idempotent, including when no favorite exists. No request body. The image must still exist and belong to the authenticated user.',
+  })
+  @ApiParam({
+    name: 'id',
+    description: 'MongoDB image identifier.',
+    example: '66e83a109af861ce27c86a02',
+  })
+  @ApiOkResponse({
+    type: FavoriteResponseDto,
+    example: { imageId: '66e83a109af861ce27c86a02', isFavorite: false },
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Image not found: invalid ID, nonexistent image, or image owned by another user.',
+  })
+  @UseGuards(JwtAuthGuard, UserThrottlerGuard)
+  async removeFavorite(
+    @Param('id') id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.imagesService.removeFavorite(id, request.user!.sub);
+  }
+
   @Get(':id')
   @Header('Cache-Control', 'private, no-store')
   @ApiBadGatewayResponse({ description: 'Unable to create image access URLs.' })

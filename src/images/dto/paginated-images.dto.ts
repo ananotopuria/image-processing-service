@@ -18,7 +18,8 @@ export class PaginatedImagesDto {
   @ApiProperty({
     type: 'integer',
     example: 42,
-    description: 'Total owned image records, including versions.',
+    description:
+      'Total matching accessible image records, including versions. On the favorites route, counts only the current user’s favorites.',
   })
   total: number;
 

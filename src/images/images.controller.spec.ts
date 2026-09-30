@@ -91,6 +91,9 @@ describe('Images API contract', () => {
     'uploadImage',
     'transformImage',
     'getMyImages',
+    'getMyFavorites',
+    'addFavorite',
+    'removeFavorite',
     'getImageById',
     'deleteImage',
   ] as const)('keeps the JWT guard on %s', (method) => {
@@ -220,6 +223,51 @@ describe('Images API contract', () => {
     expect(
       doc.paths['/api/images/{id}/transform'].post!.responses,
     ).toHaveProperty('429');
+  });
+
+  it('documents favorites routes, JWT, pagination, response examples and public fields', () => {
+    const doc = SwaggerModule.createDocument(
+      app,
+      new DocumentBuilder().addBearerAuth().build(),
+    );
+    const list = doc.paths['/api/images/favorites'].get!;
+    expect(list.security).toEqual([{ bearer: [] }]);
+    expect(list.responses['200']).toMatchObject({
+      content: {
+        'application/json': {
+          example: { items: [expect.objectContaining({ isFavorite: true })] },
+        },
+      },
+    });
+    expect(list.parameters).toEqual(doc.paths['/api/images'].get!.parameters);
+    for (const [method, isFavorite] of [
+      ['put', true],
+      ['delete', false],
+    ] as const) {
+      const operation = doc.paths['/api/images/{id}/favorite'][method]!;
+      expect(operation.security).toEqual([{ bearer: [] }]);
+      expect(operation.responses['200']).toMatchObject({
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/FavoriteResponseDto' },
+            example: { imageId: '66e83a109af861ce27c86a02', isFavorite },
+          },
+        },
+      });
+      expect(Object.keys(operation.responses)).toEqual(
+        expect.arrayContaining(['200', '401', '404', '429', '500']),
+      );
+      expect(operation.requestBody).toBeUndefined();
+    }
+    expect(doc.components!.schemas!.ImageResponseDto).toMatchObject({
+      required: expect.arrayContaining(['isFavorite']),
+    });
+    expect(doc.components!.schemas!.ImageResponseDto).not.toHaveProperty(
+      'properties.path',
+    );
+    expect(doc.components!.schemas!.ImageResponseDto).not.toHaveProperty(
+      'properties.originalKey',
+    );
   });
 
   it.each([
