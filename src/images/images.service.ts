@@ -1,3 +1,4 @@
+import { imageFilename } from './image-filename';
 import {
   BadRequestException,
   ConflictException,
@@ -259,7 +260,7 @@ export class ImagesService {
           .map((field) => [field, metadata[field]]),
       ),
       isFavorite,
-      ...(await this.s3Service.getFileUrls(image.path)),
+      ...(await this.s3Service.getFileUrls(image.path, imageFilename(image))),
     };
   }
 

@@ -8,6 +8,7 @@ import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { ImagesModule } from './images/images.module';
 import { S3Module } from './s3/s3.module';
+import { SharingModule } from './sharing/sharing.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { S3Module } from './s3/s3.module';
     AuthModule,
     ImagesModule,
     S3Module,
+    SharingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

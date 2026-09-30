@@ -66,6 +66,7 @@ describe('ImagesService', () => {
       originalKey: `originals/${userId}/source.png`,
       path: `originals/${userId}/source.png`,
       originalName: 'mountains.png',
+      format: 'png',
       originalSize: buffer.length,
     };
     model = {
@@ -142,6 +143,60 @@ describe('ImagesService', () => {
     expect(model.create.mock.calls[0]?.[0]).not.toHaveProperty('url');
   });
 
+  it('preserves a JPEG original name and signs its WebP version with the same basename', async () => {
+    const jpeg = await sharp(buffer).jpeg().toBuffer();
+    const source = await service.uploadImage(
+      {
+        ...file(),
+        buffer: jpeg,
+        size: jpeg.length,
+        mimetype: 'image/jpeg',
+        originalname: 'photo.jpg',
+      },
+      userId,
+    );
+    expect(source.originalName).toBe('photo.jpg');
+    expect(storage.getFileUrls).toHaveBeenLastCalledWith(
+      expect.any(String),
+      'photo.jpg',
+    );
+    original.originalName = 'photo.jpg';
+    storage.getFile.mockResolvedValue(jpeg);
+    const version = await service.transformImage(
+      imageId,
+      { transformations: { format: 'webp' } },
+      userId,
+    );
+    expect(version.originalName).toBe('photo.jpg');
+    expect(version.format).toBe('webp');
+    const [key, bytes] = storage.uploadFile.mock.calls[1];
+    expect((await sharp(bytes).metadata()).format).toBe('webp');
+    expect(storage.getFileUrls).toHaveBeenLastCalledWith(key, 'photo.webp');
+    expect(original.originalName).toBe('photo.jpg');
+  });
+
+  it('uses stored format when refreshing existing versions without rewriting records or keys', async () => {
+    Object.assign(original, {
+      kind: 'transformed',
+      originalName: 'photo.JPG',
+      filename: 'old-uuid.jpg',
+      format: 'webp',
+      transformations: { format: 'jpeg' },
+    });
+    const result = await service.getImageByUser(imageId, userId);
+    expect(result).toMatchObject({
+      originalName: 'photo.JPG',
+      filename: 'old-uuid.jpg',
+      format: 'webp',
+    });
+    expect(storage.getFileUrls).toHaveBeenCalledWith(
+      original.path,
+      'photo.webp',
+    );
+    expect(model.create).not.toHaveBeenCalled();
+    expect(storage.uploadFile).not.toHaveBeenCalled();
+  });
+
   it('creates distinct originals when the same file is uploaded twice', async () => {
     const first = await service.uploadImage(file(), userId);
     const second = await service.uploadImage(file(), userId);
@@ -173,6 +228,11 @@ describe('ImagesService', () => {
         quality: 65,
         processedSize: output.length,
       });
+      expect(storage.getFileUrls).toHaveBeenCalledWith(
+        key,
+        `mountains.${format === 'jpeg' ? 'jpg' : format}`,
+      );
+      expect(result.originalName).toBe('mountains.png');
       expect(original).not.toHaveProperty('processedSize');
     },
   );
@@ -676,7 +736,10 @@ describe('ImagesService', () => {
     expect(query.sort).toHaveBeenCalledWith({ createdAt: -1, _id: -1 });
     expect(query.skip).toHaveBeenCalledWith(10);
     expect(query.limit).toHaveBeenCalledWith(10);
-    expect(storage.getFileUrls).toHaveBeenCalledWith(original.path);
+    expect(storage.getFileUrls).toHaveBeenCalledWith(
+      original.path,
+      original.originalName,
+    );
   });
 
   it.each([0, 5])('returns an empty page with total %i', async (total) => {
@@ -712,7 +775,10 @@ describe('ImagesService', () => {
       original.path = 'stored/selected-file.png';
       const result = await service.getImageByUser(imageId, userId);
       expect(result.url).toBe('https://example.com/image');
-      expect(storage.getFileUrls).toHaveBeenCalledWith(original.path);
+      expect(storage.getFileUrls).toHaveBeenCalledWith(
+        original.path,
+        original.originalName,
+      );
       expect(storage.getFile).not.toHaveBeenCalled();
     },
   );

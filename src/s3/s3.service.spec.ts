@@ -41,6 +41,7 @@ describe('S3Service', () => {
     const before = Date.now();
     const result = await service.getFileUrls(
       'transformed/user/original/image.webp',
+      'photo.webp',
     );
     const display = new URL(result.url);
     const download = new URL(result.downloadUrl);
@@ -51,7 +52,7 @@ describe('S3Service', () => {
       'inline',
     );
     expect(download.searchParams.get('response-content-disposition')).toBe(
-      'attachment',
+      `attachment; filename="photo.webp"; filename*=UTF-8''photo.webp`,
     );
     expect(display.searchParams.get('response-cache-control')).toBe(
       'private, no-store',
@@ -63,11 +64,38 @@ describe('S3Service', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'photo.jpg',
+    'photo.webp',
+    'my.photo.PNG',
+    'მთა holiday.webp',
+    'a"b; c.webp',
+    'line\r\nname.webp',
+  ])(
+    'signs a safe attachment filename for %s without changing the object key',
+    async (filename) => {
+      const result = await service.getFileUrls('unchanged/key.webp', filename);
+      const url = new URL(result.downloadUrl);
+      const disposition = url.searchParams.get('response-content-disposition')!;
+      expect(url.pathname).toBe('/unchanged/key.webp');
+      expect(disposition).toMatch(
+        /^attachment; filename="[^"\r\n]*"; filename\*=UTF-8''/,
+      );
+      expect(
+        decodeURIComponent(disposition.split("filename*=UTF-8''")[1]),
+      ).toBe(filename.replace(/[\r\n]/g, '_'));
+      expect(url.searchParams.has('X-Amz-Signature')).toBe(true);
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns a safe 502 if URL signing fails', async () => {
     jest
       .mocked(presigner.getSignedUrl)
       .mockRejectedValue(new Error('private credential detail'));
-    await expect(service.getFileUrls('key')).rejects.toMatchObject({
+    await expect(
+      service.getFileUrls('key', 'photo.webp'),
+    ).rejects.toMatchObject({
       status: 502,
       message: 'Unable to create image access URLs',
     });

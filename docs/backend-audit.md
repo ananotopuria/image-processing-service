@@ -11,7 +11,7 @@ not an additional set of aliases.
 | --- | --- | --- |
 | Sign-Up | Implemented | Email/username/password DTO, bcrypt hash, public user details and JWT; duplicate email normally 409. |
 | Log-In | Implemented | Email/password verification, JWT, invalid credentials 401. |
-| JWT authentication | Implemented | Existing bearer guard protects all image routes; missing/invalid/expired JWT 401. Issued tokens currently have no configured expiry; see deployment debt. |
+| JWT authentication | Implemented | Existing bearer guard protects all image routes; missing/invalid/expired JWT 401. New tokens use `JWT_EXPIRES_IN` (default `1h`); see the sharing handoff for socket expiry. |
 | Upload image | Implemented | Multipart `file`, detected JPEG/PNG/WebP type, strictly less than 5 MiB, original bytes preserved. |
 | Transform image | Implemented | One or multiple nested operations; owned original is always the source; independent version records. |
 | Retrieve image | Implemented | Owned metadata plus private-S3 display/download URLs, up to 15 minutes. Retrieve converted versions by their IDs. |
@@ -112,11 +112,11 @@ See [image-flow.md](image-flow.md) for individual transformation bodies and orde
 
 ## Audit findings and deployment debt
 
-- **JWT lifetime:** current AuthModule does not configure `expiresIn`; issued
-  tokens are long-lived. Choose a finite lifetime and a refresh/re-login policy
-  before deployment. Changing this behavior was intentionally left separate from
-  retrieval/pagination work. Existing no-expiry tokens also need an invalidation
-  plan (e.g. deliberate signing-key rotation).
+- **JWT lifetime:** AuthModule now configures `JWT_EXPIRES_IN` (default `1h`).
+  There is no refresh-token endpoint; clients sign in again after expiration.
+  Existing no-expiry tokens remain accepted by REST but cannot connect to the new
+  notification gateway. See [sharing handoff](image-sharing-handoff.md) for the
+  connection and reconnect contract.
 - **Multipart dependencies:** Nest platform-express was updated within the
   existing 12.x range to 12.0.3, bringing Multer 2.4.0 and clearing the identified
   production upload-parser advisories. No force audit fix or major upgrade was

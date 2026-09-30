@@ -198,6 +198,7 @@ npm run lint
 npm test -- --runInBand
 npm run build
 npm run test:http
+npm run test:sharing
 npm run test:e2e -- --runInBand
 git diff --check
 ```
@@ -206,9 +207,12 @@ HTTP tests bind localhost and use in-memory MongoDB/S3 substitutes; no cloud
 credentials are needed. Unit tests also exercise real Sharp and offline URL signing.
 
 - [Transformation order and individual Postman examples](docs/image-flow.md)
+- [Email sharing and persistent notifications: frontend handoff](docs/image-sharing-handoff.md)
 - [Final roadmap audit, endpoint flow, testing checklist and deployment debt](docs/backend-audit.md)
 
 The core backend flow is implemented. Watermarking, caching and message queues are
-not implemented. JWT expiry, production resource limits, storage consistency and
+not implemented. JWT expiry now uses `JWT_EXPIRES_IN` (default `1h`). Sharing
+requires a MongoDB replica set/Atlas for transactions; Socket.IO uses the existing
+`CORS_ORIGINS` allowlist. Production resource limits, storage consistency and
 other deployment concerns are explicitly listed in the audit; this is not a claim
 of production readiness. No frontend is included.

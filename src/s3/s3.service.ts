@@ -62,12 +62,12 @@ export class S3Service {
     }
   }
 
-  async getFileUrls(key: string) {
+  async getFileUrls(key: string, filename: string) {
     const expiresIn = 15 * 60;
     const signingDate = new Date();
     try {
       const [url, downloadUrl] = await Promise.all(
-        ['inline', 'attachment'].map((disposition) =>
+        ['inline', attachmentDisposition(filename)].map((disposition) =>
           getSignedUrl(
             this.s3Client,
             new GetObjectCommand({
@@ -104,4 +104,18 @@ export class S3Service {
       throw new BadGatewayException('Unable to delete image from storage');
     }
   }
+}
+
+// Sign the filename into the response override; cross-origin download attributes
+// cannot reliably choose it. Keep a quoted ASCII fallback plus the UTF-8 name.
+function attachmentDisposition(filename: string): string {
+  // Strip header control characters and path separators from the suggested name.
+  // eslint-disable-next-line no-control-regex
+  const safeName = filename.replace(/[\u0000-\u001f\u007f/\\]/g, '_');
+  const fallback = safeName.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encoded = encodeURIComponent(safeName).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }

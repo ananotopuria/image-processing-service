@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { NotificationsAdapter } from './notifications/notifications.adapter';
 
 export function parseCorsOrigins(value: string | undefined): string[] {
   const origins = (value ?? '')
@@ -39,6 +40,7 @@ export function configureApp(app: INestApplication): void {
   const origins = parseCorsOrigins(
     app.get(ConfigService).get<string>('CORS_ORIGINS'),
   );
+  app.useWebSocketAdapter(new NotificationsAdapter(app, origins));
 
   // Register before routes and guards so preflights and errors get CORS headers.
   app.enableCors({
