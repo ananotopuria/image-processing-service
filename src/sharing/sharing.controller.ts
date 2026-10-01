@@ -35,6 +35,7 @@ import { CreateShareDto } from './dto/create-share.dto';
 import {
   ListSharingDto,
   PaginatedSharesDto,
+  PaginatedSentSharesDto,
   SharedImageResponseDto,
   ShareResponseDto,
 } from './dto/sharing-response.dto';
@@ -95,8 +96,10 @@ export class SharingController {
   @Header('Cache-Control', 'private, no-store')
   @ApiOperation({
     summary: 'List sent shares, including unavailable history, newest first',
+    description:
+      'Sender-only list with current recipient email and exact image filename/format resolved from stored IDs. Deleted records yield null summaries.',
   })
-  @ApiOkResponse({ type: PaginatedSharesDto })
+  @ApiOkResponse({ type: PaginatedSentSharesDto })
   sent(@Req() request: AuthenticatedRequest, @Query() query: ListSharingDto) {
     return this.sharing.list(request.user!.sub, 'sent', query);
   }

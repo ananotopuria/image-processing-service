@@ -16,7 +16,7 @@ dates serialize as ISO 8601 strings. Swagger is available at `/api/docs`.
 | --- | --- | --- | --- |
 | POST | `/api/shares` | JSON `{ "imageId": "…", "recipientEmail": "recipient@example.com" }` | 201, share object |
 | GET | `/api/shares/received?page=1&limit=10` | Pagination query | 200, page of shares received by the caller |
-| GET | `/api/shares/sent?page=1&limit=10` | Pagination query | 200, page of shares sent by the caller |
+| GET | `/api/shares/sent?page=1&limit=10` | Pagination query | 200, page of enriched shares sent by the caller |
 | GET | `/api/shares/:id` | Received **share ID**, not image ID | 200, `{ "share": {…}, "image": {…} }` with fresh signed URLs |
 | DELETE | `/api/shares/:id` | Sent share ID; no body | 200, share object with `revokedAt` set and `available: false` |
 | GET | `/api/notifications?page=1&limit=10` | Pagination query | 200, page of persisted notifications |
@@ -32,7 +32,7 @@ Create example:
 }
 ```
 
-201 response (also the item shape in both share lists):
+201 response (also the received-list item shape and revoke response):
 
 ```json
 {
@@ -52,6 +52,35 @@ normalization, then uses the existing UsersService email lookup. There is no
 username fallback. Self-sharing is rejected after resolving recipient identity.
 Neither user profiles nor password hashes are returned. No existing
 username-based sharing implementation or share data migration was found.
+
+Sent list, `GET /api/shares/sent?page=1&limit=10`, retains the same pagination
+and base share fields above. Each item additionally includes these required fields:
+
+```json
+{
+  "recipientEmail": "recipient@example.com",
+  "image": { "filename": "photo.webp", "format": "webp" }
+}
+```
+
+`recipientEmail` is the current email resolved from the stored `recipientId`, or
+`null` if that user was deleted. `image` describes only the stored `imageId` and is
+`null` if that exact image was deleted or no longer belongs to the sender. Its
+`filename` uses the stored original basename and actual format (`jpeg` → `.jpg`,
+`png` → `.png`, `webp` → `.webp`), exactly as the received-access endpoint does.
+The extension is replaced case-insensitively in effect by replacing the last
+suffix; multiple dots and names without extensions are supported.
+
+Lookups are batched for the current page and authorized by the requesting sender.
+Revoked shares retain these summaries when the related records exist, with
+`available: false`. Existing ID-based shares need no migration or client-side
+labels. No user profile, password, image storage key, sibling/original image
+record or signed URL is added. A deleted recipient does not change the existing
+`available` definition (revocation/image ownership); clients can show that account
+as deleted independently. Create, revoke and received-list DTOs remain unchanged.
+Swagger uses `PaginatedSentSharesDto`, `SentShareResponseDto`, and
+`SentShareImageDto` for this endpoint. Deploy this backend contract before the
+updated frontend; absent fields are a contract error, not deleted-record nulls.
 
 Received detail example, `GET /api/shares/66e83a109af861ce27c86a03`:
 

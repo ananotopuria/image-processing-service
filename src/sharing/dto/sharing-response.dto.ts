@@ -28,6 +28,32 @@ export class ShareResponseDto {
   available: boolean;
 }
 
+export class SentShareImageDto {
+  @ApiProperty({
+    description:
+      'Filename derived from the stored image name and actual format, matching shared-image access.',
+  })
+  filename: string;
+  @ApiProperty({ enum: ['jpeg', 'png', 'webp'] }) format: string;
+}
+
+export class SentShareResponseDto extends ShareResponseDto {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Current email resolved from recipientId; null if the recipient was deleted.',
+  })
+  recipientEmail: string | null;
+  @ApiProperty({
+    type: SentShareImageDto,
+    nullable: true,
+    description:
+      'Exact image resolved from imageId, including revoked shares; null if deleted or no longer owned by the sender. No storage keys or signed URLs.',
+  })
+  image: SentShareImageDto | null;
+}
+
 export class SharedImageDto {
   @ApiProperty() _id: string;
   @ApiProperty({
@@ -82,6 +108,10 @@ class PageDto {
 
 export class PaginatedSharesDto extends PageDto {
   @ApiProperty({ type: [ShareResponseDto] }) items: ShareResponseDto[];
+}
+
+export class PaginatedSentSharesDto extends PageDto {
+  @ApiProperty({ type: [SentShareResponseDto] }) items: SentShareResponseDto[];
 }
 
 export class PaginatedNotificationsDto extends PageDto {

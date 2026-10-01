@@ -519,6 +519,22 @@ test('pagination, invalid IDs, private list filters, throttling, and Swagger sch
   assert.ok(doc.paths['/api/shares'].post.requestBody);
   assert.ok(doc.components.schemas.CreateShareDto.properties.recipientEmail);
   assert.ok(doc.components.schemas.SharedImageResponseDto);
+  assert.equal(
+    doc.paths['/api/shares/sent'].get.responses['200'].content[
+      'application/json'
+    ].schema.$ref,
+    '#/components/schemas/PaginatedSentSharesDto',
+  );
+  const sentSchema = doc.components.schemas.SentShareResponseDto;
+  assert.equal(sentSchema.properties.recipientEmail.nullable, true);
+  assert.equal(sentSchema.properties.image.nullable, true);
+  assert.ok(sentSchema.required.includes('recipientEmail'));
+  assert.ok(sentSchema.required.includes('image'));
+  assert.deepEqual(
+    Object.keys(doc.components.schemas.SentShareImageDto.properties).sort(),
+    ['filename', 'format'],
+  );
+
   assert.ok(doc.paths['/api/notifications/{id}/read'].put.responses['200']);
 });
 
@@ -625,4 +641,138 @@ test('long-lived sockets disconnect on token expiry and can reconnect with a new
   client.connect();
   await reconnected;
   assert.ok(client.connected);
+});
+
+test('sent share summaries resolve stored IDs after restart without client labels', async () => {
+  const stored = await models.Share.create({
+    senderId: owner._id,
+    recipientId: recipient._id,
+    imageId: version._id,
+  });
+  await app.close();
+  await startApp();
+  const { body } = await api
+    .get('/api/shares/sent')
+    .set('Authorization', auth(owner))
+    .expect(200);
+  const item = body.items[0];
+  assert.equal(item._id, stored.id);
+  assert.equal(item.recipientEmail, recipient.email, JSON.stringify(item));
+  assert.deepEqual(item.image, { filename: 'photo.webp', format: 'webp' });
+  assert.equal(item.available, true);
+  assert.deepEqual(
+    Object.keys(item).sort(),
+    [
+      '_id',
+      'senderId',
+      'recipientId',
+      'imageId',
+      'revokedAt',
+      'createdAt',
+      'updatedAt',
+      'available',
+      'recipientEmail',
+      'image',
+    ].sort(),
+  );
+  assert.equal(signs.length, 0);
+  const saved = await models.Share.findById(stored._id).lean();
+  assert.equal(saved.recipientEmail, undefined);
+  assert.equal(saved.image, undefined);
+  const received = await api
+    .get('/api/shares/received')
+    .set('Authorization', auth(recipient))
+    .expect(200);
+  assert.equal(received.body.items[0].recipientEmail, undefined);
+  assert.equal(received.body.items[0].image, undefined);
+  await api.get('/api/shares/sent').expect(401);
+  assert.deepEqual(
+    (
+      await api
+        .get('/api/shares/sent')
+        .set('Authorization', auth(stranger))
+        .expect(200)
+    ).body.items,
+    [],
+  );
+});
+
+test('sent summaries reflect current recipient details and tolerate deleted or reassigned records', async () => {
+  const { body: share } = await create().expect(201);
+  const sent = async () =>
+    (
+      await api
+        .get('/api/shares/sent')
+        .set('Authorization', auth(owner))
+        .expect(200)
+    ).body.items[0];
+  await models.User.updateOne(
+    { _id: recipient._id },
+    { email: 'updated@example.com' },
+  );
+  assert.equal((await sent()).recipientEmail, 'updated@example.com');
+  await api
+    .delete(`/api/shares/${share._id}`)
+    .set('Authorization', auth(owner))
+    .expect(200);
+  assert.deepEqual((await sent()).image, {
+    filename: 'photo.webp',
+    format: 'webp',
+  });
+  assert.equal((await sent()).available, false);
+  await models.User.deleteOne({ _id: recipient._id });
+  assert.equal((await sent()).recipientEmail, null);
+  await models.Image.updateOne({ _id: version._id }, { user: stranger._id });
+  assert.equal((await sent()).image, null);
+  await models.Image.deleteOne({ _id: version._id });
+  assert.equal((await sent()).image, null);
+  assert.equal((await sent()).available, false);
+  assert.equal(await models.Share.countDocuments(), 1);
+});
+
+test('sent filenames match exact selected-image access for formats and filename edge cases', async () => {
+  const { body: share } = await create().expect(201);
+  const originalShare = (await create(original).expect(201)).body;
+  for (const [originalName, format, expected] of [
+    ['photo.JPG', 'webp', 'photo.webp'],
+    ['photo.WEBP', 'jpeg', 'photo.jpg'],
+    ['archive.plate.JPG', 'png', 'archive.plate.png'],
+    ['untitled', 'webp', 'untitled.webp'],
+    ['photo.JPEG', 'jpeg', 'photo.jpg'],
+    ['archive.plate.PNG', 'png', 'archive.plate.png'],
+  ]) {
+    await models.Image.updateOne(
+      { _id: version._id },
+      { originalName, format },
+    );
+    const list = await api
+      .get('/api/shares/sent')
+      .set('Authorization', auth(owner))
+      .expect(200);
+    const item = list.body.items.find((item) => item._id === share._id);
+    assert.deepEqual(item.image, { filename: expected, format });
+    const detail = await api
+      .get(`/api/shares/${share._id}`)
+      .set('Authorization', auth(recipient))
+      .expect(200);
+    assert.equal(detail.body.image.filename, item.image.filename);
+    assert.deepEqual(
+      list.body.items.find((item) => item._id === originalShare._id).image,
+      { filename: 'photo.png', format: 'png' },
+    );
+  }
+  const saved = await models.Image.findById(version._id).lean();
+  assert.equal(saved.originalName, 'archive.plate.PNG');
+  assert.equal(saved.path, 'private/selected.webp');
+  assert.equal(saved.filename, 'selected.webp');
+  await models.Image.deleteOne({ _id: original._id });
+  const deleted = (
+    await api
+      .get('/api/shares/sent')
+      .set('Authorization', auth(owner))
+      .expect(200)
+  ).body.items.find((item) => item._id === originalShare._id);
+  assert.equal(deleted.image, null);
+  assert.equal(deleted.available, false);
+  assert.equal(deleted.recipientEmail, recipient.email);
 });

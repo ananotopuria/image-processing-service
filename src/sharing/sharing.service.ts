@@ -157,14 +157,57 @@ export class SharingService implements OnModuleInit {
     };
   }
 
+  private async sentResponses(
+    shares: ShareDocument[],
+    senderId: Types.ObjectId,
+  ) {
+    if (!shares.length) return [];
+    // Resolve only the current page, using the stored relationships. Do not store
+    // email/name snapshots or expose user profiles, object keys or signed URLs.
+    const [recipients, images] = await Promise.all([
+      this.users.findEmailsByIds(shares.map((share) => share.recipientId)),
+      this.images
+        .find({
+          _id: { $in: shares.map((share) => share.imageId) },
+          user: senderId,
+        })
+        .select('_id originalName format')
+        .lean()
+        .exec(),
+    ]);
+    const emails = new Map(
+      recipients.map((recipient) => [
+        recipient._id.toString(),
+        recipient.email,
+      ]),
+    );
+    const summaries = new Map(
+      images.map((image) => [
+        image._id.toString(),
+        {
+          filename: imageFilename({ ...image, kind: 'transformed' }),
+          format: image.format,
+        },
+      ]),
+    );
+    return shares.map((share) => {
+      const image = summaries.get(share.imageId.toString()) ?? null;
+      return {
+        ...this.shareResponse(share, !share.revokedAt && image !== null),
+        recipientEmail: emails.get(share.recipientId.toString()) ?? null,
+        image,
+      };
+    });
+  }
+
   async list(
     user: string,
     direction: 'received' | 'sent',
     { page, limit }: ListSharingDto,
   ) {
+    const userId = this.userId(user);
     const filter = {
-      [direction === 'received' ? 'recipientId' : 'senderId']:
-        this.userId(user),
+      [direction === 'received' ? 'recipientId' : 'senderId']: userId,
     };
     const [shares, total] = await Promise.all([
       this.shares
@@ -175,11 +218,18 @@ export class SharingService implements OnModuleInit {
         .exec(),
       this.shares.countDocuments(filter).exec(),
     ]);
-    const available = await this.availableShareIds(shares);
+    const available =
+      direction === 'received'
+        ? await this.availableShareIds(shares)
+        : new Set<string>();
+    const items =
+      direction === 'sent'
+        ? await this.sentResponses(shares, userId)
+        : shares.map((share) =>
+            this.shareResponse(share, available.has(share._id.toString())),
+          );
     return {
-      items: shares.map((share) =>
-        this.shareResponse(share, available.has(share._id.toString())),
-      ),
+      items,
       page,
       limit,
       total,
